@@ -1,0 +1,29 @@
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Local simulation state
+backend/survivor.db
+backend/survivor.db-*
+backend/media/voice/
+
+# Frontend
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+
+# Local env files
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+
+# Dev screenshots and scratch
+tmp/
