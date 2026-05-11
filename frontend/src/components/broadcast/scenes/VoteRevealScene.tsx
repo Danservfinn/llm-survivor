@@ -19,7 +19,7 @@ export function VoteRevealScene({ event, getAgent, host }: VoteRevealSceneProps)
       <div className="scene-bug">Vote Reveal</div>
       <div className="vote-host">
         <SpeechBubble speaker={host} text={`${event.title}: ${target?.pseudonym ?? event.dialogue}.`} />
-        <Portrait agent={host} size="md" />
+        <Portrait agent={host} size="md" isSpeaking />
       </div>
       <motion.div
         className="vote-card"

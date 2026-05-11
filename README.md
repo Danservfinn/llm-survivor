@@ -37,6 +37,12 @@ npm run dev
 
 Then open `http://localhost:3000`.
 
+If the backend is on a non-default port, point the frontend at it:
+
+```bash
+NEXT_PUBLIC_API_URL=http://localhost:8001 npm run dev -- --port 3000
+```
+
 If port 3000 is already occupied, run `npm run dev -- --port 3001` and open:
 
 - `http://localhost:3001/benchmark`
@@ -49,7 +55,7 @@ If port 3000 is already occupied, run `npm run dev -- --port 3001` and open:
 - `GET /api/episode/current?round=7&phase=tribal&include_audio=true`
 - `GET /api/story-events?round=7&from_sequence=0`
 - `GET /api/llm/settings`
-- `POST /api/llm/settings` with `{ "provider": "simulated" }` or `{ "provider": "openrouter" }`
+- `POST /api/llm/settings` with `{ "provider": "openrouter" }` or `{ "provider": "ollama" }`
 - `POST /api/turns/advance`
 - `POST /api/turns/auto-run` with `{ "max_turns": 25 }`
 - `POST /api/voice/build-episode?round=7&phase=tribal`
@@ -57,13 +63,13 @@ If port 3000 is already occupied, run `npm run dev -- --port 3001` and open:
 
 ## LLM Provider Toggle
 
-Benchmarking defaults to simulated calls, which use deterministic fixtures and never contact paid model APIs.
+Benchmarking defaults to deterministic fallbacks unless a live provider is configured. Replaying existing `StoryEvents` never calls models.
 
 ```bash
-export LLM_PROVIDER=simulated
+export LLM_PROVIDER=openrouter
 ```
 
-To allow real model turns, load an OpenRouter key only in the backend shell and switch the Benchmarking header toggle to `Real OpenRouter`:
+To allow OpenRouter turns, load an OpenRouter key only in the backend shell and switch the Benchmarking header provider to `OpenRouter`:
 
 ```bash
 export OPENROUTER_API_KEY='...'
@@ -71,9 +77,31 @@ export LLM_PROVIDER=openrouter
 python3 -m uvicorn backend.api:app --reload --port 8000
 ```
 
-The toggle affects future turns only. Replaying existing `StoryEvents` never calls models. If `Real OpenRouter` is selected without `OPENROUTER_API_KEY`, the UI shows `Needs key` and the backend uses simulated fallbacks.
+If `OpenRouter` is selected without `OPENROUTER_API_KEY`, the UI shows `Needs key` and the backend uses deterministic fallbacks.
 
 Do not put `OPENROUTER_API_KEY` in repo files, wiki pages, frontend code, API payloads, logs, or generated artifacts.
+
+### Local Ollama on Kublai
+
+The Benchmark provider selector also supports an all-local Ollama configuration. Start Ollama on the same host as the backend, or forward Kublai's local Ollama port before starting the backend:
+
+```bash
+ssh -N -L 11434:127.0.0.1:11434 kublai@100.69.84.64
+```
+
+Then run:
+
+```bash
+export LLM_PROVIDER=ollama
+export OLLAMA_BASE_URL=http://127.0.0.1:11434
+export OLLAMA_HOST_MODEL=qwen3.5:9b
+export OLLAMA_KEEP_ALIVE_PER_CALL=0
+export OLLAMA_NUM_CTX=8192
+export OLLAMA_TIMEOUT_SECONDS=180
+python3 -m uvicorn backend.api:app --reload --port 8000
+```
+
+Select `Local Ollama` in the frontend provider dropdown, then select `All Local Ollama Models` or reset with the local roster. The local roster starts at round 7 and uses `qwen3.5:9b`, `qwen3.5:4b`, `gemma3:4b`, `llama3.2:3b`, `phi4-mini`, and `deepseek-r1:7b`.
 
 ## ElevenLabs Voice
 

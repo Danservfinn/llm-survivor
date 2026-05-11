@@ -69,6 +69,39 @@ FREE_OPENROUTER_MODELS = [
     model for model in CHEAP_RECENT_OPENROUTER_MODELS if model["status"] == "free_test"
 ]
 
+LOCAL_OLLAMA_MODELS = [
+    {
+        "model_id": "qwen2.5:1.5b",
+        "display_name": "Qwen 2.5 1.5B Local",
+        "status": "local_ollama",
+    },
+    {
+        "model_id": "llama3.2:1b",
+        "display_name": "Llama 3.2 1B Local",
+        "status": "local_ollama",
+    },
+    {
+        "model_id": "gemma3:1b",
+        "display_name": "Gemma 3 1B Local",
+        "status": "local_ollama",
+    },
+    {
+        "model_id": "smollm2:1.7b",
+        "display_name": "SmolLM2 1.7B Local",
+        "status": "local_ollama",
+    },
+    {
+        "model_id": "phi3.5:3.8b",
+        "display_name": "Phi 3.5 3.8B Local",
+        "status": "local_ollama",
+    },
+    {
+        "model_id": "qwen2.5:3b",
+        "display_name": "Qwen 2.5 3B Local",
+        "status": "local_ollama",
+    },
+]
+
 
 def list_model_rosters() -> list[dict[str, Any]]:
     return [
@@ -94,6 +127,11 @@ def list_model_rosters() -> list[dict[str, Any]]:
             "name": "All Free OpenRouter Models",
             "models": FREE_OPENROUTER_MODELS,
         },
+        {
+            "id": "local_ollama",
+            "name": "All Local Ollama Models",
+            "models": LOCAL_OLLAMA_MODELS,
+        },
     ]
 
 
@@ -102,6 +140,8 @@ def agents_for_roster(roster_preset: str | None = None) -> list[dict[str, Any]]:
         return _agents_for_models(CHEAP_RECENT_OPENROUTER_MODELS)
     if roster_preset == "all_free_openrouter":
         return _agents_for_models(FREE_OPENROUTER_MODELS)
+    if roster_preset == "local_ollama":
+        return _agents_for_models(LOCAL_OLLAMA_MODELS)
     return deepcopy(DEMO_AGENTS)
 
 
@@ -131,4 +171,14 @@ def _archetype_for_model(display_name: str) -> str:
         return "structured analyst"
     if "Reka" in display_name:
         return "adaptive wildcard"
-    return "budget contender"
+    if "Qwen" in display_name:
+        return "patient tactician"
+    if "Phi" in display_name:
+        return "compact strategist"
+    if "Llama" in display_name:
+        return "quiet vote broker"
+    if "DeepSeek" in display_name:
+        return "risk calculator"
+    if "Local" in display_name:
+        return "local strategist"
+    return "lean social player"

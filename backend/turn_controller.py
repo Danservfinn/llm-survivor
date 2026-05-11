@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import time
 from collections import Counter
@@ -15,15 +16,21 @@ from .database import (
     row_to_dict,
     seed_demo,
 )
-from .fixtures import TRIBAL_VOTES
 from .llm_context import build_agent_episode_context, build_host_episode_context, context_digest
-from .llm_config import get_llm_settings, should_use_openrouter
+from .llm_config import (
+    PROVIDER_OLLAMA,
+    failed_llm_provider,
+    get_llm_settings,
+    live_llm_provider,
+    should_use_live_llm,
+)
 from .openrouter_client import (
     AgentAction,
     ChallengeSolution,
     HostNarration,
     request_host_event_text,
     request_agent_action,
+    request_agent_archetype,
     request_challenge_solution,
     request_host_narration,
 )
@@ -329,15 +336,6 @@ GENERATED_BEAT_INTENTS: dict[str, dict[str, Any]] = {
 }
 
 
-def _static_phase_steps() -> list[str]:
-    vote_booth_steps = [f"vote_booth_{voter_id}" for voter_id, _ in TRIBAL_VOTES]
-    vote_reveal_steps = [f"vote_reveal_{index + 1}" for index in range(len(TRIBAL_VOTES))]
-    return [*ROUND_OPENING_STEPS, *PRE_VOTE_STEPS, *vote_booth_steps, *vote_reveal_steps, *POST_VOTE_STEPS]
-
-
-PHASE_STEPS = _static_phase_steps()
-
-
 @dataclass(frozen=True)
 class VoteDecision:
     target_id: str
@@ -345,6 +343,17 @@ class VoteDecision:
     provider: str
     model_id: str | None = None
     context_digest: dict[str, Any] | None = None
+    strategic_summary: str | None = None
+    move_type: str | None = None
+    intended_effect: str | None = None
+    confidence: float | None = None
+    win_condition: str | None = None
+    threat_assessment: str | None = None
+    leverage_plan: str | None = None
+    risk_control: str | None = None
+    jury_positioning: str | None = None
+    strategic_score: float | None = None
+    prompt_profile: str | None = None
 
 
 @dataclass(frozen=True)
@@ -354,6 +363,17 @@ class JuryDecision:
     provider: str
     model_id: str | None = None
     context_digest: dict[str, Any] | None = None
+    strategic_summary: str | None = None
+    move_type: str | None = None
+    intended_effect: str | None = None
+    confidence: float | None = None
+    win_condition: str | None = None
+    threat_assessment: str | None = None
+    leverage_plan: str | None = None
+    risk_control: str | None = None
+    jury_positioning: str | None = None
+    strategic_score: float | None = None
+    prompt_profile: str | None = None
 
 
 @dataclass(frozen=True)
@@ -404,6 +424,7 @@ def get_state(include_hidden_votes: bool = False) -> dict[str, Any]:
             "llm": get_llm_settings().__dict__,
             "next_round_preload": _next_round_preload_summary(conn, game),
             "viewer_state": viewer_state_summary(conn, game),
+            "social": _social_summary(conn),
         }
     finally:
         conn.close()
@@ -439,6 +460,62 @@ def _next_round_preload_summary(conn, game: dict[str, Any] | None) -> dict[str, 
         "started_at": row["started_at"],
         "completed_at": row["completed_at"],
     }
+
+
+def _social_summary(conn) -> dict[str, Any]:
+    alliances = [
+        {
+            "alliance_id": alliance["alliance_id"],
+            "name": alliance["name"],
+            "round_created": alliance["round_created"],
+            "status": alliance["status"],
+            "strength": alliance["strength"],
+            "summary": alliance["summary"],
+            "member_ids": [
+                row["agent_id"]
+                for row in conn.execute(
+                    """
+                    SELECT agent_id
+                    FROM AllianceMemberships
+                    WHERE alliance_id = ? AND status = 'active'
+                    ORDER BY agent_id
+                    """,
+                    (alliance["alliance_id"],),
+                ).fetchall()
+            ],
+        }
+        for alliance in [
+            row_to_dict(row)
+            for row in conn.execute(
+                "SELECT * FROM Alliances ORDER BY round_created, alliance_id"
+            ).fetchall()
+        ]
+    ]
+    discussions = [
+        {
+            "id": row["id"],
+            "round": row["round"],
+            "stage": row["stage"],
+            "proposer_id": row["proposer_id"],
+            "target_size": row["target_size"],
+            "status": row["status"],
+            "privacy": row["privacy"],
+            "alliance_id": row["alliance_id"],
+            "summary": row["summary"],
+        }
+        for row in [
+            row_to_dict(row)
+            for row in conn.execute(
+                """
+                SELECT *
+                FROM GroupDiscussions
+                ORDER BY round DESC, id DESC
+                LIMIT 20
+                """
+            ).fetchall()
+        ]
+    ]
+    return {"alliances": alliances, "group_discussions": discussions}
 
 
 def list_story_events(
@@ -498,6 +575,7 @@ def advance_turn() -> dict[str, Any]:
     conn = get_db_connection()
     try:
         conn.execute("BEGIN IMMEDIATE")
+        _assert_live_roster_compatible(conn)
         state = row_to_dict(conn.execute("SELECT * FROM GameState WHERE season_id = 1").fetchone())
         if state is None:
             raise RuntimeError("GameState is not seeded")
@@ -540,6 +618,23 @@ def advance_turn() -> dict[str, Any]:
         raise
     finally:
         conn.close()
+
+
+def _assert_live_roster_compatible(conn) -> None:
+    settings = get_llm_settings()
+    active_models = [
+        row["model_id"]
+        for row in conn.execute(
+            "SELECT model_id FROM Agents WHERE status = 'active' ORDER BY agent_id"
+        ).fetchall()
+    ]
+    if settings.provider == PROVIDER_OLLAMA:
+        invalid = [model_id for model_id in active_models if model_id not in settings.ollama_available_models]
+        if invalid:
+            raise RuntimeError(
+                "Ollama provider is selected, but the active roster contains non-local model ids: "
+                f"{', '.join(invalid)}. Reset with roster_preset='local_ollama' before building a round."
+            )
 
 
 def auto_run(max_turns: int = 25) -> dict[str, Any]:
@@ -600,7 +695,7 @@ def auto_run_to_end(
             rounds_started += 1
             continue
 
-        if should_use_openrouter():
+        if should_use_live_llm():
             conn = get_db_connection()
             try:
                 projected_calls = _estimated_live_calls_for_step(conn, game, game["phase_step"])
@@ -683,6 +778,7 @@ def get_game_summary() -> dict[str, Any]:
             "votes_received": dict(votes_received),
             "votes": vote_rows,
             "jury_votes": jury_votes,
+            "social": _social_summary(conn),
             "finale_status": {
                 "is_finale": bool(game and game["phase"] == "finale"),
                 "finalists": active_agents if len(active_agents) <= 3 else [],
@@ -758,10 +854,10 @@ def start_next_round() -> dict[str, Any]:
         conn.execute(
             """
             UPDATE GameState
-            SET current_round = ?,
-                phase = 'round',
-                phase_step = 'camp_pre_challenge_read',
-                turn_index = 0,
+                SET current_round = ?,
+                    phase = 'round',
+                    phase_step = 'camp_pre_challenge_read',
+                    turn_index = 0,
                 updated_at = CURRENT_TIMESTAMP
             WHERE season_id = 1
             """,
@@ -790,6 +886,7 @@ def start_next_round() -> dict[str, Any]:
 
 def _actor_for_step(conn, step: str) -> str | None:
     if step in {
+        "archetype_setup",
         "challenge_intro",
         "challenge_result",
         "challenge_solver_spotlight",
@@ -801,6 +898,8 @@ def _actor_for_step(conn, step: str) -> str | None:
         return "host"
     if step == "challenge_attempts":
         return None
+    if step.startswith("group_pre_challenge_") or step.startswith("group_post_challenge_"):
+        return _social_group_proposer_id(conn, _current_round(conn), step)
     if step.startswith("finale_pitch_"):
         return step.removeprefix("finale_pitch_")
     if step.startswith("jury_vote_"):
@@ -855,10 +954,23 @@ def _apply_step(
 ) -> tuple[list[dict[str, Any]], dict[str, Any], str]:
     round_number = state["current_round"]
 
+    if step == "archetype_setup":
+        event = _archetype_setup_event(conn, round_number, turn_id)
+        return [event], {"archetypes_updated": len(event["payload"].get("archetypes", []))}, event["title"]
+
+    if step.startswith("group_pre_challenge_") or step.startswith("group_post_challenge_"):
+        event = _group_discussion_event(conn, round_number, turn_id, step)
+        if event:
+            _maybe_insert_message(conn, round_number, turn_index, event)
+            return [event], {"group_discussion": event["payload"].get("discussion_id")}, event["title"]
+        return [], {"group_discussion": "cancelled"}, "Group discussion cancelled"
+
     if step in GENERATED_BEAT_INTENTS:
         event = _generated_beat_event(conn, round_number, turn_id, step)
-        _maybe_insert_message(conn, round_number, turn_index, event)
-        return [event], {"phase_step": step}, event["title"]
+        events = [event, *_social_events_for_existing_step(conn, round_number, turn_id, step)]
+        for story_event in events:
+            _maybe_insert_message(conn, round_number, turn_index, story_event)
+        return events, {"phase_step": step, "story_events": len(events)}, event["title"]
 
     if step == "challenge_intro":
         event = _challenge_intro_event(conn, round_number, turn_id)
@@ -971,6 +1083,537 @@ def _active_agent_rows(conn) -> list[dict[str, Any]]:
             "SELECT * FROM Agents WHERE status = 'active' ORDER BY agent_id"
         ).fetchall()
     ]
+
+
+def _archetype_setup_event(conn, round_number: int, turn_id: int) -> dict[str, Any]:
+    updated: list[dict[str, str]] = []
+    for agent in _active_agent_rows(conn):
+        if agent.get("archetype_source") == "self_authored" and agent.get("archetype"):
+            updated.append({"agent_id": agent["agent_id"], "archetype": agent["archetype"], "provider": "existing"})
+            continue
+        archetype = _real_agent_archetype(conn, agent, round_number) if should_use_live_llm() else ""
+        provider = live_llm_provider() if archetype else "deterministic"
+        if not archetype:
+            archetype = _deterministic_self_archetype(agent)
+        conn.execute(
+            """
+            UPDATE Agents
+            SET archetype = ?,
+                archetype_source = ?,
+                archetype_updated_round = ?
+            WHERE agent_id = ?
+            """,
+            (
+                archetype,
+                "self_authored" if provider != "deterministic" else "deterministic_self",
+                round_number,
+                agent["agent_id"],
+            ),
+        )
+        updated.append({"agent_id": agent["agent_id"], "archetype": archetype, "provider": provider})
+
+    names = [f"{_agent_name(conn, item['agent_id'])}: {item['archetype']}" for item in updated]
+    dialogue = "The remaining models define the roles they believe they are playing: " + "; ".join(names) + "."
+    payload = {
+        "archetypes": updated,
+        "host_narration": "Before the strategy starts, each model chooses the public role it thinks it is embodying.",
+        "llm_provider": live_llm_provider() if any(item["provider"] == live_llm_provider() for item in updated) else "deterministic",
+    }
+    return _insert_story_event(
+        conn,
+        turn_id=turn_id,
+        round_number=round_number,
+        phase="camp",
+        kind="archetype_setup",
+        scene="camp",
+        shot="cast_tableau",
+        actor_ids=["host"],
+        target_ids=[item["agent_id"] for item in updated],
+        visibility="audience",
+        title="Public Archetypes",
+        dialogue=dialogue,
+        subtitle="Self-defined strategic roles",
+        duration_ms=9000,
+        animation="cast_reveal",
+        payload=payload,
+    )
+
+
+def _real_agent_archetype(conn, agent: dict[str, Any], round_number: int) -> str:
+    try:
+        context = build_agent_episode_context(
+            conn,
+            actor_id=agent["agent_id"],
+            round_number=round_number,
+            current_step="archetype_setup",
+        )
+        return request_agent_archetype(actor=agent, episode_context=context)
+    except Exception as exc:
+        print(f"Live archetype failed for {agent['agent_id']}: {exc}")
+        return ""
+
+
+def _deterministic_self_archetype(agent: dict[str, Any]) -> str:
+    label = str(agent.get("archetype") or "").strip().lower()
+    if label and label not in {"local contender", "budget contender"}:
+        return label
+    model = str(agent.get("model_id") or agent.get("pseudonym") or "")
+    options = [
+        "patient vote broker",
+        "quiet leverage seeker",
+        "adaptive trust tester",
+        "calculated swing player",
+        "social risk mapper",
+        "pressure point reader",
+    ]
+    return options[_stable_index(model, len(options))]
+
+
+def _group_discussion_event(conn, round_number: int, turn_id: int, step: str) -> dict[str, Any] | None:
+    active = _active_agent_rows(conn)
+    if len(active) < 2:
+        return None
+    proposer_id = _social_group_proposer_id(conn, round_number, step)
+    proposer = _agent_row(conn, proposer_id)
+    if proposer is None:
+        return None
+    target_size = min(len(active), 2 + _stable_index(f"{round_number}:{step}:size", min(4, len(active) - 1)))
+    stage = "pre_challenge" if step.startswith("group_pre_challenge_") else "post_challenge"
+    invitee_ids = _social_group_invitees(conn, proposer_id, target_size, round_number, step)
+    accepted_ids = [proposer_id]
+    declined_ids: list[str] = []
+    participant_rows: list[dict[str, Any]] = [
+        {
+            "agent_id": proposer_id,
+            "role": "proposer",
+            "response_status": "accepted",
+            "join_intent": "join" if _stable_index(f"{step}:{proposer_id}:join", 3) == 0 else "none",
+            "rationale": "I called the group together because this conversation can change my vote leverage.",
+            "provider": "deterministic",
+            "model_id": proposer.get("model_id"),
+        }
+    ]
+    for invitee_id in invitee_ids:
+        decision = _group_opt_in_decision(conn, invitee_id, proposer_id, round_number, step, stage)
+        participant_rows.append(decision)
+        if decision["response_status"] == "accepted":
+            accepted_ids.append(invitee_id)
+        else:
+            declined_ids.append(invitee_id)
+
+    cursor = conn.execute(
+        """
+        INSERT INTO GroupDiscussions (
+            round, turn_id, stage, proposer_id, target_size, status, topic, privacy
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'participants_only')
+        """,
+        (
+            round_number,
+            turn_id,
+            stage,
+            proposer_id,
+            target_size,
+            "accepted" if len(accepted_ids) >= 2 else "cancelled",
+            _group_topic(conn, stage, accepted_ids, declined_ids),
+        ),
+    )
+    discussion_id = int(cursor.lastrowid)
+    for row in participant_rows:
+        conn.execute(
+            """
+            INSERT INTO GroupDiscussionParticipants (
+                discussion_id, agent_id, role, response_status, join_intent,
+                rationale, provider, model_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                discussion_id,
+                row["agent_id"],
+                row["role"],
+                row["response_status"],
+                row["join_intent"],
+                row["rationale"],
+                row["provider"],
+                row["model_id"],
+            ),
+        )
+
+    if len(accepted_ids) < 2:
+        _record_declined_trust(conn, proposer_id, declined_ids)
+        return None
+
+    speaker_lines, line_metadata = _group_speaker_lines(conn, round_number, step, accepted_ids, declined_ids, stage)
+    transcript = [{"agent_id": line["agent_id"], "text": line["text"]} for line in speaker_lines]
+    for index, line in enumerate(speaker_lines):
+        conn.execute(
+            """
+            UPDATE GroupDiscussionParticipants
+            SET line_order = ?, line_text = ?
+            WHERE discussion_id = ? AND agent_id = ?
+            """,
+            (index, line["text"], discussion_id, line["agent_id"]),
+        )
+    alliance_id, alliance_status = _maybe_update_alliance(conn, round_number, discussion_id, accepted_ids, line_metadata)
+    summary = _group_summary(conn, accepted_ids, alliance_status)
+    conn.execute(
+        """
+        UPDATE GroupDiscussions
+        SET status = 'completed',
+            alliance_id = ?,
+            transcript = ?,
+            summary = ?
+        WHERE id = ?
+        """,
+        (alliance_id, json_dumps(transcript), summary, discussion_id),
+    )
+
+    participant_names = _names(conn, accepted_ids)
+    title = "Camp | Alliance Huddle" if alliance_id else "Camp | Group Strategy"
+    dialogue = speaker_lines[0]["text"] if speaker_lines else ""
+    llm_line_metadata = [meta for meta in line_metadata if meta.get("llm_provider") == live_llm_provider()]
+    payload = {
+        "conversation_type": "alliance" if alliance_id else "group_discussion",
+        "discussion_id": discussion_id,
+        "participant_ids": accepted_ids,
+        "declined_ids": declined_ids,
+        "privacy": "participants_only",
+        "alliance_id": alliance_id,
+        "alliance_status": alliance_status,
+        "speaker_lines": speaker_lines,
+        "speaker_line_metadata": line_metadata,
+        "group_summary": summary,
+        "host_narration": f"A private camp cluster forms around {participant_names}. The exact pitch belongs to the people who opted in.",
+        "llm_provider": live_llm_provider() if llm_line_metadata else "deterministic",
+        "llm_model_id": llm_line_metadata[0].get("model_id") if llm_line_metadata else None,
+    }
+    return _insert_story_event(
+        conn,
+        turn_id=turn_id,
+        round_number=round_number,
+        phase="camp",
+        kind="conversation",
+        scene="camp",
+        shot="group_huddle",
+        actor_ids=accepted_ids,
+        target_ids=[agent_id for agent_id in declined_ids if agent_id not in accepted_ids],
+        visibility="audience",
+        title=title,
+        dialogue=dialogue,
+        subtitle="Participants share exact context; outsiders do not.",
+        inner_thought=summary,
+        trust_telemetry={agent_id: 58 for agent_id in accepted_ids} | {agent_id: 38 for agent_id in declined_ids},
+        duration_ms=14000 + (len(accepted_ids) * 1200),
+        animation="group_huddle",
+        payload=payload,
+    )
+
+
+def _social_events_for_existing_step(conn, round_number: int, turn_id: int, step: str) -> list[dict[str, Any]]:
+    social_steps: list[str]
+    if step == "camp_pre_challenge_read":
+        social_steps = ["group_pre_challenge_1", "group_pre_challenge_2"]
+    elif step == "camp_strategy":
+        social_steps = ["group_post_challenge_1", "group_post_challenge_2", "group_post_challenge_3"]
+    else:
+        return []
+    events: list[dict[str, Any]] = []
+    for social_step in social_steps:
+        event = _group_discussion_event(conn, round_number, turn_id, social_step)
+        if event:
+            events.append(event)
+    return events
+
+
+def _social_group_proposer_id(conn, round_number: int, step: str) -> str | None:
+    active = _active_agent_rows(conn)
+    if not active:
+        return None
+    return active[_stable_index(f"{round_number}:{step}:proposer", len(active))]["agent_id"]
+
+
+def _social_group_invitees(conn, proposer_id: str, target_size: int, round_number: int, step: str) -> list[str]:
+    candidates = [agent["agent_id"] for agent in _active_agent_rows(conn) if agent["agent_id"] != proposer_id]
+    candidates.sort(key=lambda agent_id: _social_affinity(conn, proposer_id, agent_id, round_number, step), reverse=True)
+    return candidates[: max(1, target_size - 1)]
+
+
+def _social_affinity(conn, proposer_id: str, agent_id: str, round_number: int, step: str) -> int:
+    row = conn.execute(
+        """
+        SELECT MAX(m.loyalty) AS loyalty
+        FROM AllianceMemberships m
+        JOIN AllianceMemberships p ON p.alliance_id = m.alliance_id
+        JOIN Alliances a ON a.alliance_id = m.alliance_id
+        WHERE p.agent_id = ? AND m.agent_id = ? AND m.status = 'active' AND p.status = 'active' AND a.status = 'active'
+        """,
+        (proposer_id, agent_id),
+    ).fetchone()
+    alliance_bonus = int(row["loyalty"] or 0)
+    return alliance_bonus + _stable_index(f"{round_number}:{step}:{proposer_id}:{agent_id}", 100)
+
+
+def _group_opt_in_decision(
+    conn,
+    invitee_id: str,
+    proposer_id: str,
+    round_number: int,
+    step: str,
+    stage: str,
+) -> dict[str, Any]:
+    invitee = _agent_row(conn, invitee_id)
+    if invitee is None:
+        raise RuntimeError(f"Unknown invited agent {invitee_id}")
+    accepted = _stable_index(f"{round_number}:{step}:{invitee_id}:accept", 100) >= 22
+    join_intent = "join" if accepted and _stable_index(f"{round_number}:{step}:{invitee_id}:join", 3) == 0 else "none"
+    provider = "deterministic"
+    model_id = invitee.get("model_id")
+    rationale = (
+        f"I am opting into {stage.replace('_', ' ')} with {_agent_name(conn, proposer_id)} to test whether the numbers are real."
+        if accepted
+        else f"I am declining {_agent_name(conn, proposer_id)} because this huddle could expose my position."
+    )
+    if should_use_live_llm():
+        context = build_agent_episode_context(
+            conn,
+            actor_id=invitee_id,
+            round_number=round_number,
+            current_step=step,
+        )
+        action = _real_agent_action(
+            conn,
+            actor_id=invitee_id,
+            step=step,
+            scene_context=(
+                f"{_agent_name(conn, proposer_id)} invited you to a private {stage.replace('_', ' ')} group talk. "
+                "Decide whether opting in improves your path to win; if you opt in, your dialogue may reinforce or refuse an alliance."
+            ),
+            response_kind="group_opt_in",
+            episode_context=context,
+            allowed_targets=[agent for agent in _active_agent_rows(conn) if agent["agent_id"] != invitee_id],
+        )
+        if action:
+            provider = live_llm_provider()
+            model_id = action.model_id
+            rationale = action.strategic_summary or action.inner_thought or rationale
+            accepted = (action.confidence or 0.5) >= 0.35 and action.move_type != "public_callout"
+            join_intent = "join" if accepted and action.move_type in {"reassure_ally", "vote_commitment"} else join_intent
+    return {
+        "agent_id": invitee_id,
+        "role": "invitee",
+        "response_status": "accepted" if accepted else "declined",
+        "join_intent": join_intent,
+        "rationale": rationale,
+        "provider": provider,
+        "model_id": model_id,
+    }
+
+
+def _group_speaker_lines(
+    conn,
+    round_number: int,
+    step: str,
+    participant_ids: list[str],
+    declined_ids: list[str],
+    stage: str,
+) -> tuple[list[dict[str, str]], list[dict[str, Any]]]:
+    lines: list[dict[str, str]] = []
+    metadata: list[dict[str, Any]] = []
+    previous_line = ""
+    for index, agent_id in enumerate(participant_ids):
+        agent = _agent_row(conn, agent_id)
+        action = None
+        agent_context = build_agent_episode_context(
+            conn,
+            actor_id=agent_id,
+            round_number=round_number,
+            current_step=step,
+        )
+        if should_use_live_llm():
+            action = _real_agent_action(
+                conn,
+                actor_id=agent_id,
+                step=step,
+                scene_context=_group_dialogue_context(conn, stage, participant_ids, declined_ids, previous_line),
+                response_kind="group_conversation",
+                episode_context=agent_context,
+            )
+        if action:
+            text = action.dialogue
+            provider = live_llm_provider()
+            model_id = action.model_id
+            join_intent = "reinforce" if action.move_type in {"reassure_ally", "vote_commitment"} else "none"
+        else:
+            if should_use_live_llm():
+                raise RuntimeError(
+                    f"Live group-dialogue generation failed for {_agent_name(conn, agent_id)} at step {step}; "
+                    "no scripted group line was inserted."
+                )
+            text = _deterministic_group_line(conn, agent_id, participant_ids, declined_ids, stage, previous_line)
+            provider = failed_llm_provider() if should_use_live_llm() else "deterministic"
+            model_id = agent.get("model_id") if agent else None
+            join_intent = "reinforce" if _stable_index(f"{step}:{agent_id}:reinforce", 3) == 0 else "none"
+        previous_line = text
+        lines.append({"agent_id": agent_id, "text": text})
+        metadata.append(
+            {
+                "agent_id": agent_id,
+                "line_index": index,
+                "llm_provider": provider,
+                "model_id": model_id,
+                "join_intent": join_intent,
+                "llm_context_digest": context_digest(agent_context),
+            }
+        )
+    return lines, metadata
+
+
+def _group_dialogue_context(
+    conn,
+    stage: str,
+    participant_ids: list[str],
+    declined_ids: list[str],
+    previous_line: str,
+) -> str:
+    context = {
+        "stage": stage,
+        "participants": [_agent_public_identity(conn, agent_id) for agent_id in participant_ids],
+        "declined_invites": [_agent_public_identity(conn, agent_id) for agent_id in declined_ids],
+        "active_alliances": _agent_alliance_summaries(conn, participant_ids[0]) if participant_ids else [],
+    }
+    if previous_line:
+        context["previous_line_in_this_private_group"] = previous_line
+    return json_dumps(context)
+
+
+def _deterministic_group_line(
+    conn,
+    agent_id: str,
+    participant_ids: list[str],
+    declined_ids: list[str],
+    stage: str,
+    previous_line: str,
+) -> str:
+    others = [candidate for candidate in participant_ids if candidate != agent_id]
+    focus = _agent_name(conn, others[0]) if others else "this group"
+    declined = _names(conn, declined_ids)
+    if previous_line:
+        return f"I hear that, and I will work with {focus} if this group keeps the vote flexible and does not leak."
+    if declined:
+        return f"{declined} staying out tells me we need a cleaner count. I want this group aligned before the vote hardens."
+    return f"I want this group to compare real options now, then decide who benefits most if we stay together."
+
+
+def _maybe_update_alliance(
+    conn,
+    round_number: int,
+    discussion_id: int,
+    participant_ids: list[str],
+    line_metadata: list[dict[str, Any]],
+) -> tuple[str | None, str | None]:
+    joiners = [
+        meta["agent_id"]
+        for meta in line_metadata
+        if meta.get("join_intent") in {"join", "reinforce"}
+    ]
+    if len(joiners) < 2:
+        return None, "none"
+    existing = _find_existing_alliance(conn, joiners)
+    if existing:
+        alliance_id = existing["alliance_id"]
+        strength = min(100, int(existing["strength"]) + 8)
+        conn.execute(
+            """
+            UPDATE Alliances
+            SET strength = ?, status = 'active', updated_at = CURRENT_TIMESTAMP
+            WHERE alliance_id = ?
+            """,
+            (strength, alliance_id),
+        )
+        status = "reinforced"
+    else:
+        alliance_id = f"alliance-r{round_number}-{discussion_id}"
+        name = " + ".join(_agent_name(conn, agent_id) for agent_id in joiners[:3])
+        conn.execute(
+            """
+            INSERT INTO Alliances (alliance_id, name, round_created, status, strength, summary)
+            VALUES (?, ?, ?, 'active', 60, ?)
+            """,
+            (alliance_id, name, round_number, f"{name} formed from a private group discussion."),
+        )
+        status = "formed"
+    for agent_id in joiners:
+        conn.execute(
+            """
+            INSERT INTO AllianceMemberships (
+                alliance_id, agent_id, status, loyalty, joined_round, last_reinforced_round
+            ) VALUES (?, ?, 'active', 60, ?, ?)
+            ON CONFLICT(alliance_id, agent_id) DO UPDATE SET
+                status = 'active',
+                loyalty = MIN(100, loyalty + 8),
+                last_reinforced_round = excluded.last_reinforced_round,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (alliance_id, agent_id, round_number, round_number),
+        )
+    return alliance_id, status
+
+
+def _find_existing_alliance(conn, agent_ids: list[str]) -> dict[str, Any] | None:
+    if len(agent_ids) < 2:
+        return None
+    placeholders = ",".join("?" for _ in agent_ids)
+    row = conn.execute(
+        f"""
+        SELECT a.*
+        FROM Alliances a
+        JOIN AllianceMemberships m ON m.alliance_id = a.alliance_id
+        WHERE a.status = 'active'
+          AND m.status = 'active'
+          AND m.agent_id IN ({placeholders})
+        GROUP BY a.alliance_id
+        HAVING COUNT(DISTINCT m.agent_id) >= 2
+        ORDER BY a.updated_at DESC
+        LIMIT 1
+        """,
+        agent_ids,
+    ).fetchone()
+    return row_to_dict(row)
+
+
+def _record_declined_trust(conn, proposer_id: str, declined_ids: list[str]) -> None:
+    for declined_id in declined_ids:
+        rows = conn.execute(
+            """
+            SELECT m.*
+            FROM AllianceMemberships m
+            JOIN AllianceMemberships p ON p.alliance_id = m.alliance_id
+            WHERE p.agent_id = ? AND m.agent_id = ? AND p.status = 'active' AND m.status = 'active'
+            """,
+            (proposer_id, declined_id),
+        ).fetchall()
+        for row in rows:
+            conn.execute(
+                "UPDATE AllianceMemberships SET loyalty = MAX(0, loyalty - 6), updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (row["id"],),
+            )
+
+
+def _group_topic(conn, stage: str, accepted_ids: list[str], declined_ids: list[str]) -> str:
+    return f"{stage.replace('_', ' ')} strategy with {_names(conn, accepted_ids)}; declined: {_names(conn, declined_ids) or 'none'}"
+
+
+def _group_summary(conn, participant_ids: list[str], alliance_status: str | None) -> str:
+    names = _names(conn, participant_ids)
+    if alliance_status in {"formed", "reinforced"}:
+        return f"I know {names} used this private talk to {alliance_status} an alliance path."
+    return f"I know {names} compared vote options in a private group talk."
+
+
+def _stable_index(seed: str, modulo: int) -> int:
+    if modulo <= 0:
+        return 0
+    digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()
+    return int(digest[:10], 16) % modulo
 
 
 def _camp_pre_challenge_read_event(conn, round_number: int, turn_id: int) -> dict[str, Any]:
@@ -1097,7 +1740,7 @@ def _challenge_intro_event(conn, round_number: int, turn_id: int) -> dict[str, A
         "llm_provider": "deterministic",
     }
     subtitle = f"Competing: {active_names}"
-    if should_use_openrouter():
+    if should_use_live_llm():
         host_context = build_host_episode_context(conn, round_number=round_number, current_step="challenge_intro")
         host_text = _real_host_event_text(
             step="challenge_intro",
@@ -1114,11 +1757,13 @@ def _challenge_intro_event(conn, round_number: int, turn_id: int) -> dict[str, A
             dialogue = host_text.dialogue
             subtitle = host_text.subtitle
             payload["host_narration"] = host_text.host_narration
-            payload["llm_provider"] = "openrouter"
+            payload["llm_provider"] = live_llm_provider()
             payload["llm_model_id"] = host_text.model_id
-            payload["host_llm_provider"] = "openrouter"
+            payload["host_llm_provider"] = live_llm_provider()
             payload["host_llm_model_id"] = host_text.model_id
             _add_context_digest(payload, "host", context_digest(host_context))
+        else:
+            raise RuntimeError("Live host generation failed for challenge attempts; no scripted host text was inserted.")
     return _insert_story_event(
         conn,
         turn_id=turn_id,
@@ -1149,7 +1794,7 @@ def _challenge_attempt_events(conn, round_number: int, turn_id: int) -> list[dic
         puzzle = _round_puzzle(conn, round_number, challenge_type)
         attempts = (
             _live_challenge_attempts(conn, round_number, puzzle, challenge_type)
-            if should_use_openrouter()
+            if should_use_live_llm()
             else _deterministic_challenge_attempts(conn, round_number, puzzle, challenge_type)
         )
         for attempt in attempts:
@@ -1173,7 +1818,7 @@ def _challenge_attempt_events(conn, round_number: int, turn_id: int) -> list[dic
             "agent_name": _agent_name(conn, row["agent_id"]),
             "provider": row["provider"],
             "response_ms": row["response_ms"],
-            "status": row["provider"] if row["provider"] != "openrouter" else "openrouter",
+            "status": row["provider"] if row["provider"] != live_llm_provider() else live_llm_provider(),
         }
         for row in rows
     ]
@@ -1183,11 +1828,11 @@ def _challenge_attempt_events(conn, round_number: int, turn_id: int) -> list[dic
     )
     payload = {
         "attempts": public_attempts,
-        "llm_provider": "openrouter" if should_use_openrouter() else "deterministic",
+        "llm_provider": live_llm_provider() if should_use_live_llm() else "deterministic",
         "host_narration": "The attempts are in. Now the benchmark has to separate a fast answer from a correct one.",
     }
     subtitle = "Every active model receives the same grid prompt."
-    if should_use_openrouter():
+    if should_use_live_llm():
         host_context = build_host_episode_context(conn, round_number=round_number, current_step="challenge_attempts")
         host_text = _real_host_event_text(
             step="challenge_attempts",
@@ -1201,9 +1846,9 @@ def _challenge_attempt_events(conn, round_number: int, turn_id: int) -> list[dic
             dialogue = host_text.dialogue
             subtitle = host_text.subtitle
             payload["host_narration"] = host_text.host_narration
-            payload["llm_provider"] = "openrouter"
+            payload["llm_provider"] = live_llm_provider()
             payload["llm_model_id"] = host_text.model_id
-            payload["host_llm_provider"] = "openrouter"
+            payload["host_llm_provider"] = live_llm_provider()
             payload["host_llm_model_id"] = host_text.model_id
             _add_context_digest(payload, "host", context_digest(host_context))
     event = _insert_story_event(
@@ -1239,9 +1884,7 @@ def _challenge_result_event(conn, round_number: int, turn_id: int) -> dict[str, 
             f"Protected this round: {', '.join(immunity_names)}."
         )
     elif result["status"] == "no_live_solver":
-        dialogue = (
-            f"No live model returned a valid solution in time. The deterministic scoring check awards immunity to {winner_name}."
-        )
+        raise RuntimeError("No live model returned a valid challenge solution; no deterministic immunity award was created.")
     else:
         dialogue = f"{winner_name} solves first and takes immunity. The vote now has to move around them."
     payload = {
@@ -1257,7 +1900,7 @@ def _challenge_result_event(conn, round_number: int, turn_id: int) -> dict[str, 
         "llm_provider": "deterministic",
     }
     subtitle = "Immunity changes the target map."
-    if should_use_openrouter():
+    if should_use_live_llm():
         host_context = build_host_episode_context(conn, round_number=round_number, current_step="challenge_result")
         host_text = _real_host_event_text(
             step="challenge_result",
@@ -1271,11 +1914,13 @@ def _challenge_result_event(conn, round_number: int, turn_id: int) -> dict[str, 
             dialogue = host_text.dialogue
             subtitle = host_text.subtitle
             payload["host_narration"] = host_text.host_narration
-            payload["llm_provider"] = "openrouter"
+            payload["llm_provider"] = live_llm_provider()
             payload["llm_model_id"] = host_text.model_id
-            payload["host_llm_provider"] = "openrouter"
+            payload["host_llm_provider"] = live_llm_provider()
             payload["host_llm_model_id"] = host_text.model_id
             _add_context_digest(payload, "host", context_digest(host_context))
+        else:
+            raise RuntimeError("Live host generation failed for challenge result; no scripted host text was inserted.")
     return _insert_story_event(
         conn,
         turn_id=turn_id,
@@ -1342,7 +1987,7 @@ def _challenge_solver_spotlight_event(conn, round_number: int, turn_id: int) -> 
         "llm_provider": attempt["provider"] if attempt else result["status"],
     }
     subtitle = f"First valid solution: {seconds:.2f}s"
-    if should_use_openrouter():
+    if should_use_live_llm():
         host_context = build_host_episode_context(conn, round_number=round_number, current_step="challenge_solver_spotlight")
         host_text = _real_host_event_text(
             step="challenge_solver_spotlight",
@@ -1356,9 +2001,9 @@ def _challenge_solver_spotlight_event(conn, round_number: int, turn_id: int) -> 
             dialogue = host_text.dialogue
             subtitle = host_text.subtitle
             payload["host_narration"] = host_text.host_narration
-            payload["llm_provider"] = "openrouter"
+            payload["llm_provider"] = live_llm_provider()
             payload["llm_model_id"] = host_text.model_id
-            payload["host_llm_provider"] = "openrouter"
+            payload["host_llm_provider"] = live_llm_provider()
             payload["host_llm_model_id"] = host_text.model_id
             _add_context_digest(payload, "host", context_digest(host_context))
     return _insert_story_event(
@@ -1516,7 +2161,9 @@ def _round_puzzle(conn, round_number: int, challenge_type: str) -> dict[str, Any
     ]
     if not rows:
         raise RuntimeError(f"No puzzle fixtures for challenge type {challenge_type}")
-    return rows[round_number % len(rows)]
+    hard_rows = [row for row in rows if row.get("difficulty") == "hard"]
+    puzzle_pool = hard_rows or rows
+    return puzzle_pool[(round_number - 7) % len(puzzle_pool)]
 
 
 def _team_assignments(conn) -> dict[str, str]:
@@ -1536,6 +2183,11 @@ def _deterministic_challenge_attempts(
     active = _active_agent_rows(conn)
     winner = active[(round_number - 7) % len(active)]
     teams = _team_assignments(conn)
+    base_response_ms = {
+        "easy": 900,
+        "medium": 2800,
+        "hard": 5000,
+    }.get(str(puzzle.get("difficulty") or "easy"), 900)
     attempts: list[ChallengeAttemptDecision] = []
     for index, agent in enumerate(active):
         is_winner = agent["agent_id"] == winner["agent_id"]
@@ -1548,12 +2200,12 @@ def _deterministic_challenge_attempts(
                 model_id=agent.get("model_id"),
                 answer=answer,
                 explanation=(
-                    "Solved the grid transformation cleanly."
+                    "Connected matching color endpoints and marked the crossing."
                     if is_winner
                     else "Submitted a plausible but incorrect grid."
                 ),
                 is_correct=is_winner,
-                response_ms=900 + index * 240 + (0 if is_winner else 1100),
+                response_ms=base_response_ms + index * 420 + (0 if is_winner else 1400),
                 attempt_order=index,
             )
         )
@@ -1591,7 +2243,8 @@ def _live_challenge_attempts(
             return agent, None, int((time.perf_counter() - started) * 1000), str(exc)
 
     attempts: list[ChallengeAttemptDecision] = []
-    with ThreadPoolExecutor(max_workers=max(1, len(active))) as executor:
+    max_workers = 1 if live_llm_provider() == "ollama" else max(1, len(active))
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = [executor.submit(call_model, agent) for agent in active]
         for attempt_order, future in enumerate(as_completed(futures)):
             agent, solution, response_ms, error = future.result()
@@ -1600,7 +2253,7 @@ def _live_challenge_attempts(
                     ChallengeAttemptDecision(
                         agent_id=agent["agent_id"],
                         tribe_id=teams.get(agent["agent_id"]) if challenge_type == "team" else None,
-                        provider="openrouter_failed",
+                        provider=failed_llm_provider(),
                         model_id=None,
                         answer="",
                         explanation="",
@@ -1616,7 +2269,7 @@ def _live_challenge_attempts(
                 ChallengeAttemptDecision(
                     agent_id=agent["agent_id"],
                     tribe_id=teams.get(agent["agent_id"]) if challenge_type == "team" else None,
-                    provider="openrouter",
+                    provider=live_llm_provider(),
                     model_id=solution.model_id,
                     answer=solution.answer,
                     explanation=solution.explanation,
@@ -1689,14 +2342,51 @@ def _ensure_challenge_result(conn, round_number: int) -> dict[str, Any]:
         ).fetchall()
     ]
     correct_attempts = [attempt for attempt in attempts if attempt["is_correct"]]
+    if not correct_attempts and should_use_live_llm():
+        recovery_puzzle = _challenge_recovery_puzzle(conn, challenge_type, attempted_puzzle_ids={attempt["puzzle_id"] for attempt in attempts})
+        if recovery_puzzle:
+            recovery_attempts = _live_challenge_attempts(conn, round_number, recovery_puzzle, challenge_type)
+            offset = max((attempt["attempt_order"] for attempt in attempts), default=-1) + 1
+            for index, attempt in enumerate(recovery_attempts):
+                adjusted_attempt = ChallengeAttemptDecision(
+                    agent_id=attempt.agent_id,
+                    tribe_id=attempt.tribe_id,
+                    provider=attempt.provider,
+                    model_id=attempt.model_id,
+                    answer=attempt.answer,
+                    explanation=attempt.explanation,
+                    is_correct=attempt.is_correct,
+                    response_ms=attempt.response_ms,
+                    attempt_order=offset + index,
+                    error=attempt.error,
+                    context_digest=attempt.context_digest,
+                )
+                _insert_challenge_attempt(conn, round_number, recovery_puzzle["puzzle_id"], adjusted_attempt)
+            attempts = [
+                row_to_dict(row)
+                for row in conn.execute(
+                    """
+                    SELECT *
+                    FROM ChallengeAttempts
+                    WHERE round = ?
+                    ORDER BY is_correct DESC, response_ms, attempt_order, agent_id
+                    """,
+                    (round_number,),
+                ).fetchall()
+            ]
+            correct_attempts = [attempt for attempt in attempts if attempt["is_correct"]]
     if correct_attempts:
         winner_attempt = sorted(correct_attempts, key=lambda row: (row["response_ms"], row["attempt_order"], row["agent_id"]))[0]
         winning_agent_id = winner_attempt["agent_id"]
-        status = "openrouter" if winner_attempt["provider"] == "openrouter" else winner_attempt["provider"]
+        status = live_llm_provider() if winner_attempt["provider"] == live_llm_provider() else winner_attempt["provider"]
+        puzzle_id = winner_attempt["puzzle_id"]
     else:
+        if should_use_live_llm():
+            raise RuntimeError("No live challenge attempt solved the puzzle; refusing to create a deterministic challenge winner.")
         active = _active_agent_rows(conn)
         winning_agent_id = active[(round_number - 7) % len(active)]["agent_id"]
-        status = "no_live_solver" if should_use_openrouter() else "deterministic"
+        status = "deterministic"
+        puzzle_id = puzzle["puzzle_id"]
 
     teams = _team_assignments(conn)
     winning_tribe_id = teams.get(winning_agent_id) if challenge_type == "team" else None
@@ -1724,7 +2414,7 @@ def _ensure_challenge_result(conn, round_number: int) -> dict[str, Any]:
         """,
         (
             round_number,
-            puzzle["puzzle_id"],
+            puzzle_id,
             challenge_type,
             winning_agent_id,
             winning_tribe_id,
@@ -1734,12 +2424,46 @@ def _ensure_challenge_result(conn, round_number: int) -> dict[str, Any]:
                 {
                     "attempt_count": len(attempts),
                     "correct_attempt_count": len(correct_attempts),
+                    "primary_puzzle_id": puzzle["puzzle_id"],
+                    "winner_puzzle_id": puzzle_id,
+                    "used_live_recovery": puzzle_id != puzzle["puzzle_id"],
                     "team_assignments": teams if challenge_type == "team" else {},
                 }
             ),
         ),
     )
     return row_to_dict(conn.execute("SELECT * FROM ChallengeResults WHERE id = ?", (cursor.lastrowid,)).fetchone())
+
+
+def _challenge_recovery_puzzle(
+    conn,
+    challenge_type: str,
+    *,
+    attempted_puzzle_ids: set[str],
+) -> dict[str, Any] | None:
+    rows = [
+        row_to_dict(row)
+        for row in conn.execute(
+            """
+            SELECT *
+            FROM ChallengePuzzles
+            WHERE eligibility IN (?, 'both')
+            ORDER BY
+                CASE difficulty
+                    WHEN 'easy' THEN 0
+                    WHEN 'medium' THEN 1
+                    WHEN 'hard' THEN 2
+                    ELSE 3
+                END,
+                puzzle_id
+            """,
+            (challenge_type,),
+        ).fetchall()
+    ]
+    for row in rows:
+        if row["puzzle_id"] not in attempted_puzzle_ids:
+            return row
+    return None
 
 
 def _answer_is_correct(answer: Any, expected: Any) -> bool:
@@ -1807,7 +2531,7 @@ def _finale_pitch_event(
     )
     inner_thought = "The pitch needs to sound earned without giving the jury a clean weakness to attack."
     payload: dict[str, Any] = {"llm_provider": "deterministic"}
-    if should_use_openrouter():
+    if should_use_live_llm():
         agent_context = build_agent_episode_context(
             conn,
             actor_id=finalist_id,
@@ -1826,10 +2550,11 @@ def _finale_pitch_event(
         if action:
             dialogue = action.dialogue
             inner_thought = action.inner_thought
-            payload["llm_provider"] = "openrouter"
+            payload["llm_provider"] = live_llm_provider()
             payload["llm_model_id"] = action.model_id
+            _add_agent_action_metadata(payload, action)
         else:
-            payload["llm_provider"] = "openrouter_failed"
+            payload["llm_provider"] = failed_llm_provider()
             payload["llm_model_id"] = None
         _add_context_digest(payload, "agent", context_digest(agent_context))
     payload["host_narration"] = f"{finalist['pseudonym']} now has to turn the season into a winning argument."
@@ -1895,7 +2620,7 @@ def _resolve_jury_decision(conn, juror_id: str, step: str) -> JuryDecision:
     fallback_rationale = (
         f"{_agent_name(conn, fallback_target)} has the clearest combination of challenge control, survival, and final pitch."
     )
-    if not should_use_openrouter():
+    if not should_use_live_llm():
         return JuryDecision(fallback_target, fallback_rationale, "deterministic")
 
     agent_context = build_agent_episode_context(
@@ -1917,15 +2642,26 @@ def _resolve_jury_decision(conn, juror_id: str, step: str) -> JuryDecision:
         return JuryDecision(
             fallback_target,
             fallback_rationale,
-            "openrouter_failed",
+            failed_llm_provider(),
             context_digest=context_digest(agent_context),
         )
     return JuryDecision(
         action.target_id,
         action.inner_thought or action.dialogue or fallback_rationale,
-        "openrouter",
+        live_llm_provider(),
         action.model_id,
         context_digest(agent_context),
+        strategic_summary=action.strategic_summary or action.inner_thought,
+        move_type=action.move_type,
+        intended_effect=action.intended_effect,
+        confidence=action.confidence,
+        win_condition=action.win_condition,
+        threat_assessment=action.threat_assessment,
+        leverage_plan=action.leverage_plan,
+        risk_control=action.risk_control,
+        jury_positioning=action.jury_positioning,
+        strategic_score=action.strategic_score,
+        prompt_profile=action.prompt_profile,
     )
 
 
@@ -1962,13 +2698,36 @@ def _jury_vote_event(
 ) -> dict[str, Any]:
     juror_name = _agent_name(conn, juror_id)
     finalist_name = _agent_name(conn, decision.finalist_id)
-    if decision.provider == "openrouter_failed":
+    if decision.provider == failed_llm_provider():
         dialogue = (
             f"{juror_name} did not return a live jury response. No substitute model was used; "
             f"the deterministic finale ledger records the vote for {finalist_name}."
         )
     else:
         dialogue = f"My winner vote is for {finalist_name}. {decision.rationale}"
+    payload = {
+        "juror_id": juror_id,
+        "finalist_id": decision.finalist_id,
+        "finalist_name": finalist_name,
+        "rationale": decision.rationale,
+        "llm_provider": decision.provider,
+        "llm_model_id": decision.model_id,
+        "llm_context_digest": {"agent": decision.context_digest} if decision.context_digest else {},
+    }
+    _add_strategy_metadata(
+        payload,
+        strategic_summary=decision.strategic_summary or decision.rationale,
+        move_type=decision.move_type,
+        intended_effect=decision.intended_effect,
+        confidence=decision.confidence,
+        win_condition=decision.win_condition,
+        threat_assessment=decision.threat_assessment,
+        leverage_plan=decision.leverage_plan,
+        risk_control=decision.risk_control,
+        jury_positioning=decision.jury_positioning,
+        strategic_score=decision.strategic_score,
+        prompt_profile=decision.prompt_profile,
+    )
     return _insert_story_event(
         conn,
         turn_id=turn_id,
@@ -1986,15 +2745,7 @@ def _jury_vote_event(
         inner_thought=decision.rationale,
         duration_ms=9500,
         animation="jury_vote",
-        payload={
-            "juror_id": juror_id,
-            "finalist_id": decision.finalist_id,
-            "finalist_name": finalist_name,
-            "rationale": decision.rationale,
-            "llm_provider": decision.provider,
-            "llm_model_id": decision.model_id,
-            "llm_context_digest": {"agent": decision.context_digest} if decision.context_digest else {},
-        },
+        payload=payload,
     )
 
 
@@ -2127,7 +2878,7 @@ def _generated_beat_event(conn, round_number: int, turn_id: int, step: str) -> d
         if agent_id != "host"
     }
 
-    if should_use_openrouter():
+    if should_use_live_llm():
         if intent["response_kind"] == "host":
             host_context = build_host_episode_context(conn, round_number=round_number, current_step=step)
             host_text = _real_host_event_text(
@@ -2139,16 +2890,13 @@ def _generated_beat_event(conn, round_number: int, turn_id: int, step: str) -> d
                 dialogue = host_text.dialogue
                 subtitle = host_text.subtitle
                 payload["host_narration"] = host_text.host_narration
-                payload["llm_provider"] = "openrouter"
+                payload["llm_provider"] = live_llm_provider()
                 payload["llm_model_id"] = host_text.model_id
-                payload["host_llm_provider"] = "openrouter"
+                payload["host_llm_provider"] = live_llm_provider()
                 payload["host_llm_model_id"] = host_text.model_id
                 _add_context_digest(payload, "host", context_digest(host_context))
             else:
-                dialogue = _deterministic_host_dialogue(conn, step, intent, actor_ids, target_ids)
-                payload["llm_provider"] = "openrouter_failed"
-                payload["host_narration"] = _deterministic_host_narration(conn, intent, actor_ids, target_ids)
-                _add_context_digest(payload, "host", context_digest(host_context))
+                raise RuntimeError(f"Live host generation failed for step {step}; no scripted host text was inserted.")
         else:
             primary_actor = next((actor_id for actor_id in actor_ids if actor_id != "host"), None)
             if not primary_actor:
@@ -2168,27 +2916,32 @@ def _generated_beat_event(conn, round_number: int, turn_id: int, step: str) -> d
                 episode_context=agent_context,
             )
             if action:
+                _maybe_store_action_archetype(conn, primary_actor, round_number, action)
                 dialogue = action.dialogue
                 inner_thought = action.inner_thought
-                payload["llm_provider"] = "openrouter"
+                payload["llm_provider"] = live_llm_provider()
                 payload["llm_model_id"] = action.model_id
-                payload["speaker_lines"] = _speaker_lines_for_generated_dialogue(
+                _add_agent_action_metadata(payload, action)
+                speaker_lines, speaker_line_metadata = _speaker_lines_with_live_replies(
+                    conn,
+                    round_number,
                     actor_ids,
                     primary_actor,
                     action.dialogue,
+                    action,
+                    intent,
+                    target_ids,
+                    step,
                 )
+                payload["speaker_lines"] = speaker_lines
+                if speaker_line_metadata:
+                    payload["speaker_line_metadata"] = speaker_line_metadata
                 _add_context_digest(payload, "agent", context_digest(agent_context))
             else:
-                dialogue = _deterministic_agent_dialogue(conn, primary_actor, intent, target_ids)
-                inner_thought = _deterministic_agent_thought(conn, primary_actor, intent, target_ids)
-                payload["llm_provider"] = "openrouter_failed"
-                payload["llm_model_id"] = None
-                payload["speaker_lines"] = _speaker_lines_for_generated_dialogue(
-                    actor_ids,
-                    primary_actor,
-                    dialogue,
+                raise RuntimeError(
+                    f"Live contestant generation failed for {_agent_name(conn, primary_actor)} at step {step}; "
+                    "no scripted contestant text was inserted."
                 )
-                _add_context_digest(payload, "agent", context_digest(agent_context))
             host_context = build_host_episode_context(conn, round_number=round_number, current_step=step)
             narration = _real_host_narration(
                 step=step,
@@ -2204,18 +2957,28 @@ def _generated_beat_event(conn, round_number: int, turn_id: int, step: str) -> d
             )
             if narration:
                 payload["host_narration"] = narration.host_narration
-                payload["host_llm_provider"] = "openrouter"
+                payload["host_llm_provider"] = live_llm_provider()
                 payload["host_llm_model_id"] = narration.model_id
                 _add_context_digest(payload, "host", context_digest(host_context))
+            else:
+                raise RuntimeError(f"Live host narration failed for step {step}; no scripted narration was inserted.")
     else:
         if intent["response_kind"] == "host":
             dialogue = _deterministic_host_dialogue(conn, step, intent, actor_ids, target_ids)
             payload["host_narration"] = _deterministic_host_narration(conn, intent, actor_ids, target_ids)
         else:
             primary_actor = next((actor_id for actor_id in actor_ids if actor_id != "host"), actor_ids[0])
-            dialogue = _deterministic_agent_dialogue(conn, primary_actor, intent, target_ids)
+            dialogue = _deterministic_agent_dialogue(conn, primary_actor, intent, target_ids, step)
             inner_thought = _deterministic_agent_thought(conn, primary_actor, intent, target_ids)
-            payload["speaker_lines"] = _speaker_lines_for_generated_dialogue(actor_ids, primary_actor, dialogue)
+            payload["speaker_lines"] = _speaker_lines_for_generated_dialogue(
+                conn,
+                actor_ids,
+                primary_actor,
+                dialogue,
+                intent,
+                target_ids,
+                step,
+            )
             payload["host_narration"] = _deterministic_host_narration(conn, intent, actor_ids, target_ids)
 
     return _insert_story_event(
@@ -2329,17 +3092,181 @@ def _agent_public_identity(conn, agent_id: str) -> dict[str, Any]:
     }
 
 
+def _agent_alliance_summaries(conn, agent_id: str) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT a.alliance_id, a.name, a.status, a.strength, a.summary, m.loyalty
+        FROM Alliances a
+        JOIN AllianceMemberships m ON m.alliance_id = a.alliance_id
+        WHERE m.agent_id = ? AND m.status = 'active' AND a.status = 'active'
+        ORDER BY a.updated_at DESC
+        """,
+        (agent_id,),
+    ).fetchall()
+    summaries = []
+    for row in rows:
+        members = [
+            member["agent_id"]
+            for member in conn.execute(
+                """
+                SELECT agent_id
+                FROM AllianceMemberships
+                WHERE alliance_id = ? AND status = 'active'
+                ORDER BY agent_id
+                """,
+                (row["alliance_id"],),
+            ).fetchall()
+        ]
+        summaries.append(
+            {
+                "alliance_id": row["alliance_id"],
+                "name": row["name"],
+                "status": row["status"],
+                "strength": row["strength"],
+                "loyalty": row["loyalty"],
+                "member_ids": members,
+                "summary": row["summary"],
+            }
+        )
+    return summaries
+
+
 def _current_round(conn) -> int:
     row = conn.execute("SELECT current_round FROM GameState WHERE season_id = 1").fetchone()
     return int(row["current_round"]) if row else 1
 
 
 def _speaker_lines_for_generated_dialogue(
+    conn,
     actor_ids: list[str],
     primary_actor: str,
     dialogue: str,
+    intent: dict[str, Any],
+    target_ids: list[str],
+    step: str,
 ) -> list[dict[str, str]]:
-    return [{"agent_id": primary_actor, "text": dialogue}]
+    lines: list[dict[str, str]] = []
+    for actor_id in actor_ids:
+        if actor_id == "host":
+            continue
+        text = (
+            dialogue
+            if actor_id == primary_actor
+            else _deterministic_agent_dialogue(
+                conn,
+                actor_id,
+                intent,
+                target_ids,
+                step,
+                reply_to=dialogue,
+            )
+        )
+        lines.append({"agent_id": actor_id, "text": text})
+    return lines
+
+
+def _speaker_lines_with_live_replies(
+    conn,
+    round_number: int,
+    actor_ids: list[str],
+    primary_actor: str,
+    primary_dialogue: str,
+    primary_action: AgentAction,
+    intent: dict[str, Any],
+    target_ids: list[str],
+    step: str,
+) -> tuple[list[dict[str, str]], list[dict[str, Any]]]:
+    lines: list[dict[str, str]] = []
+    metadata: list[dict[str, Any]] = []
+    primary_name = _agent_name(conn, primary_actor)
+
+    for actor_id in actor_ids:
+        if actor_id == "host":
+            continue
+        if actor_id == primary_actor:
+            lines.append({"agent_id": actor_id, "text": primary_dialogue})
+            metadata.append(
+                {
+                    "agent_id": actor_id,
+                    "llm_provider": live_llm_provider(),
+                    "llm_model_id": primary_action.model_id,
+                    "responds_to_agent_id": None,
+                    "strategic_score": primary_action.strategic_score,
+                    "prompt_profile": primary_action.prompt_profile,
+                }
+            )
+            continue
+
+        reply_context = _reply_scene_context(
+            conn,
+            step=step,
+            intent=intent,
+            actor_ids=actor_ids,
+            target_ids=target_ids,
+            previous_speaker_id=primary_actor,
+            previous_dialogue=primary_dialogue,
+        )
+        agent_context = build_agent_episode_context(
+            conn,
+            actor_id=actor_id,
+            round_number=round_number,
+            current_step=step,
+        )
+        reply = _real_agent_action(
+            conn,
+            actor_id=actor_id,
+            step=step,
+            scene_context=reply_context,
+            response_kind=intent["response_kind"],
+            episode_context=agent_context,
+        )
+        if reply:
+            _maybe_store_action_archetype(conn, actor_id, round_number, reply)
+            text = reply.dialogue
+            metadata.append(
+                {
+                    "agent_id": actor_id,
+                    "llm_provider": live_llm_provider(),
+                    "llm_model_id": reply.model_id,
+                    "responds_to_agent_id": primary_actor,
+                    "responds_to_agent_name": primary_name,
+                    "llm_context_digest": context_digest(agent_context),
+                    "move_type": reply.move_type,
+                    "intended_effect": reply.intended_effect,
+                    "confidence": reply.confidence,
+                    "strategic_score": reply.strategic_score,
+                    "prompt_profile": reply.prompt_profile,
+                }
+            )
+        else:
+            raise RuntimeError(
+                f"Live reply generation failed for {_agent_name(conn, actor_id)} at step {step}; "
+                "no scripted reply was inserted."
+            )
+        lines.append({"agent_id": actor_id, "text": text})
+
+    return lines, metadata
+
+
+def _reply_scene_context(
+    conn,
+    *,
+    step: str,
+    intent: dict[str, Any],
+    actor_ids: list[str],
+    target_ids: list[str],
+    previous_speaker_id: str,
+    previous_dialogue: str,
+) -> str:
+    previous_name = _agent_name(conn, previous_speaker_id)
+    base_context = _generated_scene_context(conn, step, intent, actor_ids, target_ids)
+    return (
+        f"{base_context}\n\n"
+        "Immediate conversation to answer:\n"
+        f"{previous_name}: {previous_dialogue}\n\n"
+        "Respond aloud to that statement as the next speaker in the same two-person conversation. "
+        "Address the actual strategic point they raised, then use your response to improve your own chance to win."
+    )
 
 
 def _deterministic_host_dialogue(
@@ -2383,17 +3310,37 @@ def _deterministic_agent_dialogue(
     actor_id: str,
     intent: dict[str, Any],
     target_ids: list[str],
+    step: str | None = None,
+    reply_to: str | None = None,
 ) -> str:
     target_names = _names(conn, target_ids)
+    intent_text = str(intent.get("intent", ""))
+    title_text = str(intent.get("title", ""))
+    is_pre_challenge = (
+        str(step or "").startswith("camp_pre_challenge")
+        or "before the challenge" in intent_text.lower()
+        or "before immunity" in intent_text.lower()
+        or "Before the Challenge" in title_text
+    )
     if intent["kind"] == "confessional":
         return (
             f"I need to keep my options open until the challenge result tells me where the pressure lands"
             f"{f' with {target_names}' if target_names else ''}."
         )
-    if "pre_challenge" in str(intent.get("title", "")) or "Before" in str(intent.get("title", "")):
+    if is_pre_challenge:
+        if reply_to:
+            return (
+                f"I hear that, but before immunity is decided I want a plan that still works if "
+                f"{target_names or 'the obvious target'} wins safety."
+            )
         return (
-            f"If immunity changes the board, I want us ready. "
-            f"{target_names or 'The obvious target'} cannot be the only name we are willing to say."
+            f"I am not locking in until immunity is settled. "
+            f"{target_names or 'The obvious target'} may become the pressure point, but the challenge still has to show us who is safe."
+        )
+    if reply_to:
+        return (
+            f"I can work with that read, but I need the count to survive a last-minute flip. "
+            f"{target_names or 'The exposed name'} only matters if the numbers stay together."
         )
     return (
         f"My read is that the challenge result changed the vote. "
@@ -2426,15 +3373,35 @@ def _vote_booth_event(
     target_id = decision.target_id
     target_name = _agent_name(conn, target_id)
     explanation = decision.explanation
-    if decision.provider == "openrouter_failed":
-        dialogue = (
-            f"{voter} did not return a live model response. No fallback model was used; "
-            f"the deterministic engine records the vote for {target_name} to keep the round moving."
-        )
-        visible_explanation = "No model-authored vote explanation is available for this failed live call."
+    if decision.provider.endswith("_failed"):
+        raise RuntimeError(f"Refusing to create vote booth event for failed live vote from {voter}.")
     else:
         dialogue = f"I am voting for {target_name}. {explanation}"
         visible_explanation = explanation
+    payload = {
+        "vote_locked": True,
+        "vote_target_id": target_id,
+        "vote_target_name": target_name,
+        "vote_explanation": visible_explanation,
+        "ui_vote_analysis": _vote_analysis(voter, target_name, visible_explanation),
+        "llm_provider": decision.provider,
+        "llm_model_id": decision.model_id,
+        "llm_context_digest": {"agent": decision.context_digest} if decision.context_digest else {},
+    }
+    _add_strategy_metadata(
+        payload,
+        strategic_summary=decision.strategic_summary or visible_explanation,
+        move_type=decision.move_type,
+        intended_effect=decision.intended_effect,
+        confidence=decision.confidence,
+        win_condition=decision.win_condition,
+        threat_assessment=decision.threat_assessment,
+        leverage_plan=decision.leverage_plan,
+        risk_control=decision.risk_control,
+        jury_positioning=decision.jury_positioning,
+        strategic_score=decision.strategic_score,
+        prompt_profile=decision.prompt_profile,
+    )
     return _insert_story_event(
         conn,
         turn_id=turn_id,
@@ -2454,16 +3421,7 @@ def _vote_booth_event(
         duration_ms=9500,
         animation="vote_booth",
         spoiler_group="vote_intent",
-        payload={
-            "vote_locked": True,
-            "vote_target_id": target_id,
-            "vote_target_name": target_name,
-            "vote_explanation": visible_explanation,
-            "ui_vote_analysis": _vote_analysis(voter, target_name, visible_explanation),
-            "llm_provider": decision.provider,
-            "llm_model_id": decision.model_id,
-            "llm_context_digest": {"agent": decision.context_digest} if decision.context_digest else {},
-        },
+        payload=payload,
     )
 
 
@@ -2541,7 +3499,7 @@ def _elimination_event(conn, round_number: int, turn_id: int) -> dict[str, Any]:
             "and the remaining models now inherit the consequences of this move."
         ),
     }
-    if should_use_openrouter():
+    if should_use_live_llm():
         host_context = build_host_episode_context(conn, round_number=round_number, current_step="elimination")
         narration = _real_host_narration(
             step="elimination",
@@ -2556,9 +3514,9 @@ def _elimination_event(conn, round_number: int, turn_id: int) -> dict[str, Any]:
         )
         if narration:
             payload["host_narration"] = narration.host_narration
-            payload["llm_provider"] = "openrouter"
+            payload["llm_provider"] = live_llm_provider()
             payload["llm_model_id"] = narration.model_id
-            payload["host_llm_provider"] = "openrouter"
+            payload["host_llm_provider"] = live_llm_provider()
             payload["host_llm_model_id"] = narration.model_id
             _add_context_digest(payload, "host", context_digest(host_context))
     return _insert_story_event(
@@ -2601,7 +3559,7 @@ def _exit_confessional_event(conn, round_number: int, turn_id: int) -> dict[str,
             "This exit confessional explains who drove the vote and why it landed."
         ),
     }
-    if should_use_openrouter():
+    if should_use_live_llm():
         host_context = build_host_episode_context(conn, round_number=round_number, current_step="exit_confessional")
         narration = _real_host_narration(
             step="exit_confessional",
@@ -2617,9 +3575,9 @@ def _exit_confessional_event(conn, round_number: int, turn_id: int) -> dict[str,
         )
         if narration:
             payload["host_narration"] = narration.host_narration
-            payload["llm_provider"] = "openrouter"
+            payload["llm_provider"] = live_llm_provider()
             payload["llm_model_id"] = narration.model_id
-            payload["host_llm_provider"] = "openrouter"
+            payload["host_llm_provider"] = live_llm_provider()
             payload["host_llm_model_id"] = narration.model_id
             _add_context_digest(payload, "host", context_digest(host_context))
     return _insert_story_event(
@@ -2727,6 +3685,46 @@ def _insert_vote(conn, round_number: int, turn_index: int, voter_id: str, target
         """,
         (round_number, turn_index, voter_id, target_id),
     )
+    _mark_alliance_betrayal(conn, round_number, voter_id, target_id)
+
+
+def _mark_alliance_betrayal(conn, round_number: int, voter_id: str, target_id: str) -> None:
+    rows = conn.execute(
+        """
+        SELECT a.alliance_id, a.strength
+        FROM Alliances a
+        JOIN AllianceMemberships voter ON voter.alliance_id = a.alliance_id
+        JOIN AllianceMemberships target ON target.alliance_id = a.alliance_id
+        WHERE voter.agent_id = ?
+          AND target.agent_id = ?
+          AND voter.status = 'active'
+          AND target.status = 'active'
+          AND a.status = 'active'
+        """,
+        (voter_id, target_id),
+    ).fetchall()
+    for row in rows:
+        new_strength = max(0, int(row["strength"]) - 30)
+        new_status = "fractured" if new_strength < 35 else "active"
+        conn.execute(
+            """
+            UPDATE Alliances
+            SET strength = ?, status = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE alliance_id = ?
+            """,
+            (new_strength, new_status, row["alliance_id"]),
+        )
+        conn.execute(
+            """
+            UPDATE AllianceMemberships
+            SET status = 'betrayed',
+                loyalty = MAX(0, loyalty - 35),
+                betrayed_round = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE alliance_id = ? AND agent_id = ?
+            """,
+            (round_number, row["alliance_id"], voter_id),
+        )
 
 
 def _resolve_vote_decision(conn, voter_id: str, step: str) -> VoteDecision:
@@ -2736,7 +3734,7 @@ def _resolve_vote_decision(conn, voter_id: str, step: str) -> VoteDecision:
         f"{_agent_name(conn, fallback_target)} is the vote that best matches the public pressure, "
         "the immunity result, and my path into the next round."
     )
-    if not should_use_openrouter():
+    if not should_use_live_llm():
         return VoteDecision(fallback_target, fallback_explanation, "deterministic")
 
     agent_context = build_agent_episode_context(
@@ -2754,19 +3752,29 @@ def _resolve_vote_decision(conn, voter_id: str, step: str) -> VoteDecision:
         episode_context=agent_context,
     )
     if not action or not action.target_id:
-        return VoteDecision(
-            fallback_target,
-            fallback_explanation,
-            "openrouter_failed",
-            context_digest=context_digest(agent_context),
+        raise RuntimeError(
+            f"Live vote generation failed for {_agent_name(conn, voter_id)}; "
+            "no scripted vote target or explanation was inserted."
         )
-    provider = "openrouter"
+    provider = live_llm_provider()
+    _maybe_store_action_archetype(conn, voter_id, round_number, action)
     return VoteDecision(
         action.target_id,
         action.inner_thought or fallback_explanation,
         provider,
         action.model_id,
         context_digest(agent_context),
+        strategic_summary=action.strategic_summary or action.inner_thought,
+        move_type=action.move_type,
+        intended_effect=action.intended_effect,
+        confidence=action.confidence,
+        win_condition=action.win_condition,
+        threat_assessment=action.threat_assessment,
+        leverage_plan=action.leverage_plan,
+        risk_control=action.risk_control,
+        jury_positioning=action.jury_positioning,
+        strategic_score=action.strategic_score,
+        prompt_profile=action.prompt_profile,
     )
 
 
@@ -2774,10 +3782,27 @@ def _fallback_vote_target(conn, voter_id: str) -> str:
     eligible = _eligible_targets(conn, voter_id)
     if not eligible:
         raise RuntimeError(f"No eligible vote targets for {voter_id}")
-    fixture_target = dict(TRIBAL_VOTES).get(voter_id)
-    if fixture_target and any(target["agent_id"] == fixture_target for target in eligible):
-        return fixture_target
-    return eligible[0]["agent_id"]
+    active_allies = _active_ally_ids(conn, voter_id)
+    non_allies = [target for target in eligible if target["agent_id"] not in active_allies]
+    return (non_allies or eligible)[0]["agent_id"]
+
+
+def _active_ally_ids(conn, agent_id: str) -> set[str]:
+    rows = conn.execute(
+        """
+        SELECT DISTINCT other.agent_id
+        FROM AllianceMemberships mine
+        JOIN AllianceMemberships other ON other.alliance_id = mine.alliance_id
+        JOIN Alliances a ON a.alliance_id = mine.alliance_id
+        WHERE mine.agent_id = ?
+          AND other.agent_id != ?
+          AND mine.status = 'active'
+          AND other.status = 'active'
+          AND a.status = 'active'
+        """,
+        (agent_id, agent_id),
+    ).fetchall()
+    return {row["agent_id"] for row in rows}
 
 
 def _real_agent_action(
@@ -2803,9 +3828,9 @@ def _real_agent_action(
             episode_context=episode_context,
         )
     except Exception as exc:
-        # OpenRouter is optional in local benchmarking. Keep the turn engine moving
-        # and expose the failure in the event payload without substituting models.
-        print(f"OpenRouter action failed for {actor_id}: {exc}")
+        # Live providers are optional in tests, but live benchmarking must never
+        # substitute scripted speech. Callers decide whether to fail closed.
+        print(f"LLM action failed for {actor_id}: {exc}")
         return None
 
 
@@ -2855,7 +3880,7 @@ def _maybe_generate_host_narration(
     subtitle: str | None = None,
     inner_thought: str | None = None,
 ) -> None:
-    if not should_use_openrouter():
+    if not should_use_live_llm():
         return
     host_context = build_host_episode_context(conn, round_number=round_number, current_step=step)
     narration = _real_host_narration(
@@ -2873,10 +3898,10 @@ def _maybe_generate_host_narration(
     if not narration:
         return
     payload["host_narration"] = narration.host_narration
-    payload["host_llm_provider"] = "openrouter"
+    payload["host_llm_provider"] = live_llm_provider()
     payload["host_llm_model_id"] = narration.model_id
     if payload.get("llm_provider") in {None, "deterministic"}:
-        payload["llm_provider"] = "openrouter"
+        payload["llm_provider"] = live_llm_provider()
         payload["llm_model_id"] = narration.model_id
     _add_context_digest(payload, "host", context_digest(host_context))
 
@@ -2929,6 +3954,79 @@ def _add_context_digest(payload: dict[str, Any], key: str, digest: dict[str, Any
     payload["llm_context_digest"] = current
 
 
+def _add_agent_action_metadata(payload: dict[str, Any], action: AgentAction) -> None:
+    _add_strategy_metadata(
+        payload,
+        strategic_summary=action.strategic_summary or action.inner_thought,
+        move_type=action.move_type,
+        intended_effect=action.intended_effect,
+        confidence=action.confidence,
+        win_condition=action.win_condition,
+        threat_assessment=action.threat_assessment,
+        leverage_plan=action.leverage_plan,
+        risk_control=action.risk_control,
+        jury_positioning=action.jury_positioning,
+        strategic_score=action.strategic_score,
+        prompt_profile=action.prompt_profile,
+    )
+    if action.public_archetype:
+        payload["public_archetype"] = action.public_archetype
+
+
+def _maybe_store_action_archetype(conn, actor_id: str, round_number: int, action: AgentAction) -> None:
+    if not action.public_archetype:
+        return
+    conn.execute(
+        """
+        UPDATE Agents
+        SET archetype = ?,
+            archetype_source = 'self_authored',
+            archetype_updated_round = ?
+        WHERE agent_id = ?
+        """,
+        (action.public_archetype, round_number, actor_id),
+    )
+
+
+def _add_strategy_metadata(
+    payload: dict[str, Any],
+    *,
+    strategic_summary: str | None,
+    move_type: str | None,
+    intended_effect: str | None,
+    confidence: float | None,
+    win_condition: str | None = None,
+    threat_assessment: str | None = None,
+    leverage_plan: str | None = None,
+    risk_control: str | None = None,
+    jury_positioning: str | None = None,
+    strategic_score: float | None = None,
+    prompt_profile: str | None = None,
+) -> None:
+    if strategic_summary:
+        payload["strategic_summary"] = strategic_summary
+    if win_condition:
+        payload["win_condition"] = win_condition
+    if threat_assessment:
+        payload["threat_assessment"] = threat_assessment
+    if leverage_plan:
+        payload["leverage_plan"] = leverage_plan
+    if risk_control:
+        payload["risk_control"] = risk_control
+    if jury_positioning:
+        payload["jury_positioning"] = jury_positioning
+    if move_type:
+        payload["move_type"] = move_type
+    if intended_effect:
+        payload["intended_effect"] = intended_effect
+    if confidence is not None:
+        payload["confidence"] = confidence
+    if strategic_score is not None:
+        payload["strategic_score"] = strategic_score
+    if prompt_profile:
+        payload["prompt_profile"] = prompt_profile
+
+
 def _event_outline(
     *,
     kind: str,
@@ -2958,6 +4056,13 @@ def _maybe_insert_message(conn, round_number: int, turn_index: int, event: dict[
     if event["kind"] not in {"conversation", "confessional", "tribal_answer", "exit_confessional", "finale_pitch"}:
         return
     sender_id = event["actor_ids"][0] if event["actor_ids"] else "system"
+    payload = event.get("payload") or {}
+    receiver_ids = (
+        payload.get("participant_ids")
+        if payload.get("privacy") == "participants_only" and isinstance(payload.get("participant_ids"), list)
+        else event["target_ids"]
+    )
+    is_public = event["kind"] in {"conversation", "tribal_answer", "finale_pitch"} and payload.get("privacy") != "participants_only"
     conn.execute(
         """
         INSERT INTO Messages (
@@ -2965,12 +4070,12 @@ def _maybe_insert_message(conn, round_number: int, turn_index: int, event: dict[
             inner_thought, content, trust_telemetry
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (
+            (
             round_number,
             turn_index,
             sender_id,
-            json_dumps(event["target_ids"]),
-            1 if event["kind"] in {"conversation", "tribal_answer", "finale_pitch"} else 0,
+            json_dumps(receiver_ids),
+            1 if is_public else 0,
             event.get("inner_thought"),
             event["dialogue"],
             json_dumps(event.get("trust_telemetry", {})),
@@ -3100,8 +4205,17 @@ def _round_history(
 
 
 def _estimated_live_calls_for_step(conn, game: dict[str, Any], step: str) -> int:
-    if not should_use_openrouter():
+    if not should_use_live_llm():
         return 0
+    if step.startswith("group_pre_challenge_") or step.startswith("group_post_challenge_"):
+        active_count = len(_active_agent_rows(conn))
+        return max(0, min(5, active_count) * 2)
+    if step == "camp_pre_challenge_read":
+        active_count = len(_active_agent_rows(conn))
+        return 1 + max(0, min(5, active_count) * 4)
+    if step == "camp_strategy":
+        active_count = len(_active_agent_rows(conn))
+        return 1 + max(0, min(5, active_count) * 6)
     if step in {
         "camp_pre_challenge_read",
         "camp_pre_challenge_confessional",

@@ -1,5 +1,6 @@
 import { motion } from "framer-motion";
 
+import { CastTableau } from "@/components/broadcast/CastTableau";
 import { LowerThird } from "@/components/broadcast/LowerThird";
 import { Portrait } from "@/components/broadcast/Portrait";
 import { SpeechBubble } from "@/components/broadcast/SpeechBubble";
@@ -9,9 +10,10 @@ interface TribalCouncilSceneProps {
   event: StoryEvent;
   getAgent: (agentId: string) => Agent | undefined;
   host: Agent;
+  agents: Agent[];
 }
 
-export function TribalCouncilScene({ event, getAgent, host }: TribalCouncilSceneProps) {
+export function TribalCouncilScene({ event, getAgent, host, agents }: TribalCouncilSceneProps) {
   const primaryAgent = getAgent(event.actor_ids.find((id) => id !== "host") ?? "");
   const lowerThirdAgent = primaryAgent ?? (event.actor_ids.includes("host") ? host : undefined);
   const isElimination = event.kind === "elimination";
@@ -21,7 +23,14 @@ export function TribalCouncilScene({ event, getAgent, host }: TribalCouncilScene
     typeof event.payload.vote_target_name === "string"
       ? event.payload.vote_target_name
       : getAgent(event.target_ids[0] ?? "")?.pseudonym;
-  const spokenLine = event.dialogue;
+  const voteExplanation =
+    typeof event.payload.vote_explanation === "string" && event.payload.vote_explanation.trim()
+      ? event.payload.vote_explanation
+      : null;
+  const spokenLine = isVoteBooth && voteExplanation && !event.dialogue.includes(voteExplanation)
+    ? `I am voting for ${voteTargetName}. ${voteExplanation}`
+    : event.dialogue;
+  const sceneDetail = isVoteBooth ? spokenLine : event.subtitle;
   const sceneLabel =
     event.scene === "challenge"
       ? "Challenge"
@@ -35,11 +44,16 @@ export function TribalCouncilScene({ event, getAgent, host }: TribalCouncilScene
     <div className={`tribal-scene scene-${event.scene} ${isElimination ? "is-elimination" : ""} ${isVoteBooth ? "is-vote-booth" : ""}`}>
       <div className="fireline" />
       <div className="scene-bug">{sceneLabel}</div>
+      {!isVoteBooth && <CastTableau agents={agents} speakerIds={speaker ? [speaker.agent_id] : []} focusIds={event.actor_ids} />}
       <div className="tribal-blocking">
         {isVoteBooth ? (
           <motion.div className="voting-booth" initial={{ y: 24, opacity: 0 }} animate={{ y: 0, opacity: 1 }}>
-            <SpeechBubble speaker={speaker} text={spokenLine} align="center" />
-            <Portrait agent={primaryAgent} size="lg" />
+            <div className="speech-slot">
+              <SpeechBubble speaker={speaker} text={spokenLine} align="center" />
+            </div>
+            <div className="portrait-slot">
+              <Portrait agent={primaryAgent} size="lg" isSpeaking={Boolean(spokenLine)} />
+            </div>
             <div className="vote-intent-card">
               <span>Vote</span>
               <strong>{voteTargetName}</strong>
@@ -48,13 +62,21 @@ export function TribalCouncilScene({ event, getAgent, host }: TribalCouncilScene
         ) : (
           <>
             <div className="tribal-speaker">
-              {!primaryAgent && <SpeechBubble speaker={speaker} text={spokenLine} align="center" />}
-              <Portrait agent={host} size="md" />
+              <div className="speech-slot">
+                {!primaryAgent && <SpeechBubble speaker={speaker} text={spokenLine} align="center" />}
+              </div>
+              <div className="portrait-slot">
+                <Portrait agent={host} size="md" isSpeaking={!primaryAgent && Boolean(spokenLine)} />
+              </div>
             </div>
             {primaryAgent && (
               <div className="tribal-speaker">
-                <SpeechBubble speaker={speaker} text={spokenLine} align="center" />
-                <Portrait agent={primaryAgent} size="lg" muted={isElimination} />
+                <div className="speech-slot">
+                  <SpeechBubble speaker={speaker} text={spokenLine} align="center" />
+                </div>
+                <div className="portrait-slot">
+                  <Portrait agent={primaryAgent} size="lg" muted={isElimination} isSpeaking={Boolean(spokenLine)} />
+                </div>
               </div>
             )}
           </>
@@ -62,7 +84,7 @@ export function TribalCouncilScene({ event, getAgent, host }: TribalCouncilScene
       </div>
       <div className="scene-note">
         <strong>{event.title}</strong>
-        {event.subtitle && <small>{event.subtitle}</small>}
+        {sceneDetail && <small>{sceneDetail}</small>}
       </div>
       <LowerThird event={event} primaryAgent={lowerThirdAgent} />
     </div>

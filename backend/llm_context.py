@@ -38,7 +38,7 @@ def build_agent_episode_context(
     public_timeline = [
         _agent_public_event(event)
         for event in prior_events
-        if event["kind"] in AGENT_PUBLIC_KINDS
+        if event["kind"] in AGENT_PUBLIC_KINDS and not _participants_only_event(event)
     ]
     static_private_memory = _actor_static_memory(conn, actor_id)
     event_private_memory = [
@@ -47,7 +47,13 @@ def build_agent_episode_context(
         if actor_id in event["actor_ids"]
         and (event["kind"] in AGENT_PRIVATE_KINDS or event.get("inner_thought"))
     ]
-    actor_private_memory = static_private_memory + _tail(event_private_memory)
+    private_group_memory = [
+        _actor_group_event(event)
+        for event in prior_events
+        if _participants_only_event(event) and actor_id in _participant_ids(event)
+    ]
+    alliance_memory = _actor_alliance_memory(conn, actor_id)
+    actor_private_memory = static_private_memory + alliance_memory + _tail([*event_private_memory, *private_group_memory])
     public_timeline = _tail(public_timeline)
     return {
         "visibility": "contestant_public_plus_own",
@@ -60,6 +66,8 @@ def build_agent_episode_context(
             "visibility": "contestant_public_plus_own",
             "public_events": len(public_timeline),
             "actor_private_events": len(actor_private_memory),
+            "private_group_events": len(private_group_memory),
+            "active_alliances": len(alliance_memory),
             "revealed_votes": _revealed_vote_count(conn),
             "season_events_seen": len(prior_events),
         },
@@ -155,6 +163,23 @@ def _host_event(event: dict[str, Any]) -> dict[str, Any]:
     return summary
 
 
+def _actor_group_event(event: dict[str, Any]) -> dict[str, Any]:
+    summary = _base_event(event)
+    payload = event.get("payload") or {}
+    summary["privacy"] = "participants_only"
+    summary["participant_ids"] = _participant_ids(event)
+    summary["group_summary"] = payload.get("group_summary")
+    summary["speaker_lines"] = [
+        {"agent_id": line.get("agent_id"), "text": line.get("text")}
+        for line in payload.get("speaker_lines", [])
+        if isinstance(line, dict) and isinstance(line.get("agent_id"), str) and isinstance(line.get("text"), str)
+    ]
+    if payload.get("alliance_id"):
+        summary["alliance_id"] = payload["alliance_id"]
+        summary["alliance_status"] = payload.get("alliance_status")
+    return summary
+
+
 def _base_event(event: dict[str, Any]) -> dict[str, Any]:
     return {
         "round": event["round"],
@@ -166,6 +191,58 @@ def _base_event(event: dict[str, Any]) -> dict[str, Any]:
         "dialogue": event["dialogue"],
         "subtitle": event.get("subtitle"),
     }
+
+
+def _participants_only_event(event: dict[str, Any]) -> bool:
+    payload = event.get("payload") or {}
+    return payload.get("privacy") == "participants_only"
+
+
+def _participant_ids(event: dict[str, Any]) -> list[str]:
+    payload = event.get("payload") or {}
+    participant_ids = payload.get("participant_ids")
+    if isinstance(participant_ids, list):
+        return [agent_id for agent_id in participant_ids if isinstance(agent_id, str)]
+    return [agent_id for agent_id in event.get("actor_ids", []) if isinstance(agent_id, str)]
+
+
+def _actor_alliance_memory(conn, actor_id: str) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT a.alliance_id, a.name, a.status, a.strength, a.summary, m.loyalty
+        FROM Alliances a
+        JOIN AllianceMemberships m ON m.alliance_id = a.alliance_id
+        WHERE m.agent_id = ? AND m.status = 'active' AND a.status = 'active'
+        ORDER BY a.updated_at DESC
+        """,
+        (actor_id,),
+    ).fetchall()
+    memories = []
+    for row in rows:
+        members = [
+            member["agent_id"]
+            for member in conn.execute(
+                """
+                SELECT agent_id
+                FROM AllianceMemberships
+                WHERE alliance_id = ? AND status = 'active'
+                ORDER BY agent_id
+                """,
+                (row["alliance_id"],),
+            ).fetchall()
+        ]
+        memories.append(
+            {
+                "kind": "active_alliance",
+                "alliance_id": row["alliance_id"],
+                "name": row["name"],
+                "member_ids": members,
+                "strength": row["strength"],
+                "loyalty": row["loyalty"],
+                "summary": row["summary"],
+            }
+        )
+    return memories
 
 
 def _actor_label(event: dict[str, Any]) -> str:

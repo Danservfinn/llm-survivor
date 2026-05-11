@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from .database import ensure_database, get_db_connection, json_dumps, row_to_dict
-from .llm_config import should_use_openrouter
+from .llm_config import failed_llm_provider, live_llm_provider, should_use_live_llm
 from .llm_context import build_agent_episode_context, build_host_episode_context, context_digest
 from .openrouter_client import request_agent_action, request_host_narration
 
@@ -36,7 +36,7 @@ def start_next_round_preload(run_inline: bool = False) -> dict[str, Any]:
         if existing and existing["status"] in {"pending", "running", "complete"}:
             return existing
 
-        provider = "openrouter" if should_use_openrouter() else "deterministic"
+        provider = live_llm_provider() if should_use_live_llm() else "deterministic"
         if existing:
             conn.execute(
                 """
@@ -91,7 +91,7 @@ def run_next_round_preload(preload_id: int) -> None:
 
         source_round = preload["source_round"]
         target_round = preload["target_round"]
-        provider = "openrouter" if should_use_openrouter() else "deterministic"
+        provider = live_llm_provider() if should_use_live_llm() else "deterministic"
         context_conn = get_db_connection()
         try:
             agent_responses = _build_agent_responses(context_conn, source_round, target_round, provider)
@@ -215,7 +215,7 @@ def _build_agent_responses(conn, source_round: int, target_round: int, provider:
         allowed_targets = [candidate for candidate in agents if candidate["agent_id"] != actor_id]
         action = None
         response_provider = provider
-        if provider == "openrouter":
+        if provider == live_llm_provider():
             try:
                 action = request_agent_action(
                     actor=agent,
@@ -229,7 +229,7 @@ def _build_agent_responses(conn, source_round: int, target_round: int, provider:
                     episode_context=episode_context,
                 )
             except Exception as exc:
-                response_provider = "openrouter_failed"
+                response_provider = failed_llm_provider()
                 action = None
                 error = str(exc)
             else:
@@ -274,7 +274,7 @@ def _build_host_response(conn, source_round: int, target_round: int, provider: s
         round_number=source_round,
         current_step=f"preload_round_{target_round}_host",
     )
-    if provider == "openrouter":
+    if provider == live_llm_provider():
         try:
             narration = request_host_narration(
                 step=f"preload_round_{target_round}_host",
@@ -288,14 +288,14 @@ def _build_host_response(conn, source_round: int, target_round: int, provider: s
             )
             return {
                 "host_narration": narration.host_narration,
-                "llm_provider": "openrouter",
+                "llm_provider": live_llm_provider(),
                 "llm_model_id": narration.model_id,
                 "llm_context_digest": context_digest(episode_context),
             }
         except Exception as exc:
             return {
                 "host_narration": f"Round {target_round} is already taking shape while the last vote plays out.",
-                "llm_provider": "openrouter_failed",
+                "llm_provider": failed_llm_provider(),
                 "llm_model_id": None,
                 "llm_context_digest": context_digest(episode_context),
                 "error": str(exc),

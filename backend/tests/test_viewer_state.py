@@ -39,7 +39,8 @@ class ViewerStateTest(unittest.TestCase):
 
         state = update_viewer_state(replay_index=99, is_playing=True)
 
-        self.assertEqual(state["replay_index"], 2)
+        event_count = turn_controller.get_state()["story_event_count"]
+        self.assertEqual(state["replay_index"], event_count - 1)
         self.assertTrue(state["is_playing"])
 
     def test_reset_clears_viewer_state(self) -> None:

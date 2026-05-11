@@ -1,5 +1,7 @@
-import { redirect } from "next/navigation";
-
 export default function Home() {
-  redirect("/benchmark");
+  return (
+    <main className="home-redirect" aria-label="LLM Survivor home">
+      <a href="/benchmark">Open Benchmarking</a>
+    </main>
+  );
 }

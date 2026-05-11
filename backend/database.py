@@ -27,6 +27,7 @@ JSON_COLUMNS = {
     "attempt_payload",
     "result_payload",
     "immunity_agent_ids",
+    "transcript",
 }
 
 
@@ -92,6 +93,65 @@ def init_database(reset: bool = False, path: Path | str | None = None) -> None:
                 action_points INTEGER NOT NULL DEFAULT 0,
                 elimination_round INTEGER,
                 portrait_seed TEXT NOT NULL DEFAULT ''
+            );
+
+            CREATE TABLE IF NOT EXISTS GroupDiscussions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                round INTEGER NOT NULL,
+                turn_id INTEGER,
+                stage TEXT NOT NULL,
+                proposer_id TEXT NOT NULL,
+                target_size INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'proposed',
+                topic TEXT NOT NULL DEFAULT '',
+                privacy TEXT NOT NULL DEFAULT 'participants_only',
+                alliance_id TEXT,
+                transcript TEXT NOT NULL DEFAULT '[]',
+                summary TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS GroupDiscussionParticipants (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                discussion_id INTEGER NOT NULL,
+                agent_id TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'invitee',
+                response_status TEXT NOT NULL DEFAULT 'pending',
+                join_intent TEXT NOT NULL DEFAULT 'none',
+                line_order INTEGER,
+                line_text TEXT NOT NULL DEFAULT '',
+                rationale TEXT NOT NULL DEFAULT '',
+                provider TEXT NOT NULL DEFAULT 'deterministic',
+                model_id TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(discussion_id, agent_id),
+                FOREIGN KEY(discussion_id) REFERENCES GroupDiscussions(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS Alliances (
+                alliance_id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                round_created INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active',
+                strength INTEGER NOT NULL DEFAULT 60,
+                summary TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS AllianceMemberships (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                alliance_id TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active',
+                loyalty INTEGER NOT NULL DEFAULT 60,
+                joined_round INTEGER NOT NULL,
+                last_reinforced_round INTEGER,
+                betrayed_round INTEGER,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(alliance_id, agent_id),
+                FOREIGN KEY(alliance_id) REFERENCES Alliances(alliance_id)
             );
 
             CREATE TABLE IF NOT EXISTS Messages (
@@ -281,10 +341,18 @@ def init_database(reset: bool = False, path: Path | str | None = None) -> None:
                 ON Turns(round, turn_index);
             CREATE INDEX IF NOT EXISTS idx_votes_round_revealed
                 ON Votes(round, revealed);
+            CREATE INDEX IF NOT EXISTS idx_group_discussions_round
+                ON GroupDiscussions(round, stage);
+            CREATE INDEX IF NOT EXISTS idx_group_participants_agent
+                ON GroupDiscussionParticipants(agent_id, response_status);
+            CREATE INDEX IF NOT EXISTS idx_alliance_members_agent
+                ON AllianceMemberships(agent_id, status);
             """
         )
         _seed_challenge_puzzles(conn)
         _ensure_column(conn, "Agents", "model_id", "TEXT NOT NULL DEFAULT ''")
+        _ensure_column(conn, "Agents", "archetype_source", "TEXT NOT NULL DEFAULT 'seeded'")
+        _ensure_column(conn, "Agents", "archetype_updated_round", "INTEGER")
         _ensure_agent_model_ids(conn)
         _ensure_viewer_state(conn)
         conn.commit()
@@ -307,6 +375,10 @@ def seed_demo(
         conn.execute("DELETE FROM VoiceLines")
         conn.execute("DELETE FROM NextRoundPreloads")
         conn.execute("DELETE FROM ViewerState")
+        conn.execute("DELETE FROM AllianceMemberships")
+        conn.execute("DELETE FROM Alliances")
+        conn.execute("DELETE FROM GroupDiscussionParticipants")
+        conn.execute("DELETE FROM GroupDiscussions")
         conn.execute("DELETE FROM StoryEvents")
         conn.execute("DELETE FROM Turns")
         conn.execute("DELETE FROM JuryVotes")
@@ -337,10 +409,11 @@ def seed_demo(
             """
             INSERT INTO Agents (
                 agent_id, pseudonym, model_id, archetype, team_id, status, has_immunity,
-                confessional_memory, action_points, elimination_round, portrait_seed
+                confessional_memory, action_points, elimination_round, portrait_seed,
+                archetype_source, archetype_updated_round
             ) VALUES (
                 :agent_id, :pseudonym, :model_id, :archetype, :team_id, 'active', :has_immunity,
-                :confessional_memory, 0, NULL, :portrait_seed
+                :confessional_memory, 0, NULL, :portrait_seed, 'seeded', NULL
             )
             """,
             agents_for_roster(roster_preset),
@@ -368,6 +441,10 @@ def _database_ready() -> bool:
             "Turns",
             "StoryEvents",
             "ViewerState",
+            "GroupDiscussions",
+            "GroupDiscussionParticipants",
+            "Alliances",
+            "AllianceMemberships",
             "ChallengePuzzles",
             "ChallengeAttempts",
             "ChallengeResults",

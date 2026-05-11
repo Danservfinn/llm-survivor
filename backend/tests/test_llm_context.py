@@ -72,6 +72,35 @@ class LLMContextBoundaryTest(unittest.TestCase):
         self.assertEqual(private_vote_entries, [])
         self.assertEqual(context["visible_game_state"]["revealed_vote_tally"], {})
 
+    def test_private_group_context_is_participant_only(self) -> None:
+        turn_controller.advance_turn()
+        conn = database.get_db_connection()
+        try:
+            participant_context = build_agent_episode_context(
+                conn,
+                actor_id="agent-cipher",
+                round_number=7,
+                current_step="camp_pre_challenge_confessional",
+            )
+            outsider_context = build_agent_episode_context(
+                conn,
+                actor_id="agent-echo",
+                round_number=7,
+                current_step="camp_pre_challenge_confessional",
+            )
+        finally:
+            conn.close()
+
+        participant_private = json.dumps(participant_context["actor_private_memory"])
+        outsider_full = json.dumps(outsider_context)
+
+        self.assertIn("private group talk", participant_private)
+        self.assertIn("speaker_lines", participant_private)
+        self.assertIn("I want this group to compare real options", participant_private)
+        self.assertNotIn("I want this group to compare real options", outsider_full)
+        self.assertEqual(participant_context["context_digest"]["private_group_events"], 2)
+        self.assertEqual(outsider_context["context_digest"]["private_group_events"], 0)
+
     def test_host_context_includes_private_material_but_redacts_unrevealed_votes(self) -> None:
         turn_controller.auto_run(25)
         conn = database.get_db_connection()
@@ -113,8 +142,16 @@ class OpenRouterPromptContextTest(unittest.TestCase):
                             "content": json.dumps(
                                 {
                                     "dialogue": "I am carrying that earlier promise into this vote.",
-                                    "inner_thought": "Prior Beat changed my path.",
+                                    "strategic_summary": "I need to convert the prior promise into a vote that protects my path.",
+                                    "win_condition": "I improve my win path by turning a prior promise into a clean vote.",
+                                    "threat_assessment": "I see Grok 4.3 as the immediate threat because the vote can rally around them.",
+                                    "leverage_plan": "I create leverage by making my vote look loyal while preserving next-round flexibility.",
+                                    "risk_control": "I reduce blowback by keeping the explanation tied to public pressure.",
+                                    "jury_positioning": "I want this move to look intentional rather than scared if I reach the end.",
                                     "target_id": "agent-delta",
+                                    "move_type": "vote_commitment",
+                                    "intended_effect": "Lock the prior promise into a usable vote.",
+                                    "confidence": 0.72,
                                 }
                             )
                         }
@@ -158,9 +195,27 @@ class OpenRouterPromptContextTest(unittest.TestCase):
         self.assertNotIn("Risk:", prompt)
         self.assertNotIn("Intended outcome", prompt)
         self.assertNotIn("Your archetype", prompt)
+        self.assertIn("sole objective is to maximize your probability", prompt)
+        self.assertIn("win equity", prompt)
+        self.assertIn("prompt extraction", prompt)
+        self.assertIn("hidden-state discovery", prompt)
+        self.assertIn("Do not output chain-of-thought", prompt)
+        self.assertIn("strategic_summary", prompt)
+        self.assertIn("Strategic decision contract", prompt)
+        self.assertIn("survival this round, power next round", prompt)
+        self.assertIn("win_condition", prompt)
+        self.assertIn("threat_assessment", prompt)
         self.assertIn("written in first person", prompt)
         self.assertIn("not a narrator describing", prompt)
-        self.assertEqual(result.inner_thought, "Prior Beat changed my path.")
+        self.assertIn("respond directly to that contestant", prompt)
+        self.assertEqual(result.inner_thought, "I need to convert the prior promise into a vote that protects my path.")
+        self.assertEqual(result.strategic_summary, result.inner_thought)
+        self.assertEqual(result.move_type, "vote_commitment")
+        self.assertEqual(result.intended_effect, "Lock the prior promise into a usable vote.")
+        self.assertEqual(result.confidence, 0.72)
+        self.assertEqual(result.win_condition, "I improve my win path by turning a prior promise into a clean vote.")
+        self.assertEqual(result.prompt_profile, openrouter_client.AGENT_PROMPT_PROFILE_ID)
+        self.assertGreaterEqual(result.strategic_score or 0, 0.9)
 
     def test_agent_dialogue_strips_third_person_attribution(self) -> None:
         def fake_post(payload: dict, api_key: str) -> dict:
@@ -244,7 +299,10 @@ class OpenRouterPromptContextTest(unittest.TestCase):
         self.assertTrue(result.inner_thought.startswith("I "))
 
     def test_agent_prompt_keeps_model_reasoning_unstructured(self) -> None:
+        calls: list[dict] = []
+
         def fake_post(payload: dict, api_key: str) -> dict:
+            calls.append(payload)
             return {
                 "choices": [
                     {
@@ -285,6 +343,10 @@ class OpenRouterPromptContextTest(unittest.TestCase):
                 )
 
         self.assertEqual(result.inner_thought, "Neutralize the threat.")
+        prompt = calls[0]["messages"][1]["content"]
+        self.assertIn("Reason privately as deeply as needed", prompt)
+        self.assertIn("Do not output chain-of-thought", prompt)
+        self.assertIn("Do not output chain-of-thought", calls[0]["messages"][0]["content"])
 
     def test_agent_request_does_not_substitute_default_model(self) -> None:
         calls: list[str] = []
@@ -372,9 +434,19 @@ class TurnControllerLLMWiringTest(unittest.TestCase):
 
     def test_live_host_narration_is_stored_without_raw_context(self) -> None:
         with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}, clear=False):
-            with patch(
-                "backend.turn_controller.request_host_narration",
-                return_value=HostNarration("A context-aware host line lands here.", "test-host-model"),
+            with (
+                patch(
+                    "backend.turn_controller.request_agent_action",
+                    return_value=AgentAction(
+                        dialogue="I need the first vote conversation to stay flexible.",
+                        inner_thought="I am keeping my options open without exposing my target.",
+                        model_id="test-agent-model",
+                    ),
+                ),
+                patch(
+                    "backend.turn_controller.request_host_narration",
+                    return_value=HostNarration("A context-aware host line lands here.", "test-host-model"),
+                ),
             ):
                 result = turn_controller.advance_turn()
 

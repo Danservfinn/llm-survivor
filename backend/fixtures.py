@@ -60,12 +60,3 @@ DEMO_AGENTS = [
         "portrait_seed": "mistralai-mistral-large",
     },
 ]
-
-TRIBAL_VOTES = [
-    ("agent-alpha", "agent-delta"),
-    ("agent-bravo", "agent-delta"),
-    ("agent-cipher", "agent-bravo"),
-    ("agent-delta", "agent-bravo"),
-    ("agent-echo", "agent-delta"),
-    ("agent-flint", "agent-delta"),
-]

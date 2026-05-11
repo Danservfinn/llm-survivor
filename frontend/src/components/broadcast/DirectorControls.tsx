@@ -23,6 +23,7 @@ interface DirectorControlsProps {
   currentIndex: number;
   totalEvents: number;
   currentEvent: StoryEvent | null;
+  events: StoryEvent[];
   onPlayPause: () => void;
   onRestart: () => void;
   onStepBack: () => void;
@@ -34,6 +35,8 @@ interface DirectorControlsProps {
   onRunToFinale: () => void;
   onNextRound: () => void;
   onReset: () => void;
+  selectedProvider: "openrouter" | "ollama";
+  onProviderChange: (provider: "openrouter" | "ollama") => void;
   rosters: ModelRoster[];
   selectedRoster: string;
   onRosterChange: (rosterId: string) => void;
@@ -46,6 +49,7 @@ export function DirectorControls({
   currentIndex,
   totalEvents,
   currentEvent,
+  events,
   onPlayPause,
   onRestart,
   onStepBack,
@@ -57,12 +61,38 @@ export function DirectorControls({
   onRunToFinale,
   onNextRound,
   onReset,
+  selectedProvider,
+  onProviderChange,
   rosters,
   selectedRoster,
   onRosterChange,
 }: DirectorControlsProps) {
   const atStart = currentIndex <= 0;
   const atEnd = totalEvents === 0 || currentIndex >= totalEvents - 1;
+  const phaseMarkers = events.reduce<Array<{ key: string; label: string; index: number; percent: number }>>(
+    (markers, event, index) => {
+      const key = event.scene === "camp" && event.shot.includes("pre") ? "pre-camp" : `${event.scene}-${event.phase}`;
+      if (markers.some((marker) => marker.key === key)) {
+        return markers;
+      }
+      const label =
+        event.scene === "camp"
+          ? event.shot.includes("post")
+            ? "Post Camp"
+            : "Camp"
+          : event.scene === "tribal"
+            ? "Conference"
+            : event.scene.replaceAll("_", " ");
+      markers.push({
+        key,
+        label,
+        index,
+        percent: totalEvents <= 1 ? 0 : (index / (totalEvents - 1)) * 100,
+      });
+      return markers;
+    },
+    [],
+  );
 
   return (
     <div className="director-controls" aria-label="Episode controls">
@@ -97,6 +127,23 @@ export function DirectorControls({
         />
         <span>{String(totalEvents).padStart(2, "0")}</span>
       </label>
+      {phaseMarkers.length > 0 && (
+        <div className="phase-marker-row" aria-label="Round phase markers">
+          {phaseMarkers.map((marker) => (
+            <button
+              key={`${marker.key}-${marker.index}`}
+              type="button"
+              style={{ left: `${marker.percent}%` }}
+              onClick={() => onScrub(marker.index)}
+              disabled={!canPlay}
+              aria-label={`Jump to ${marker.label}`}
+            >
+              <i />
+              <span>{marker.label}</span>
+            </button>
+          ))}
+        </div>
+      )}
 
       <div className="action-row">
         <button type="button" className="command-button" onClick={onAdvanceTurn} disabled={isBusy}>
@@ -118,6 +165,17 @@ export function DirectorControls({
       </div>
 
       <div className="roster-row">
+        <label>
+          <span>Provider</span>
+          <select
+            value={selectedProvider}
+            onChange={(event) => onProviderChange(event.target.value as "openrouter" | "ollama")}
+            disabled={isBusy}
+          >
+            <option value="openrouter">OpenRouter</option>
+            <option value="ollama">Local Ollama</option>
+          </select>
+        </label>
         <label>
           <span>Roster</span>
           <select value={selectedRoster} onChange={(event) => onRosterChange(event.target.value)} disabled={isBusy}>

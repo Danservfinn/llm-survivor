@@ -23,7 +23,7 @@ export function ConfessionalFrame({ event, getAgent, host }: ConfessionalFramePr
         animate={{ opacity: 1, scale: 1 }}
         transition={{ duration: 0.35 }}
       >
-        <Portrait agent={agent} size="lg" />
+        <Portrait agent={agent} size="lg" isSpeaking={Boolean(event.dialogue)} />
       </motion.div>
       <div className="confessional-copy">
         <span>{event.subtitle ?? "Confessional"}</span>

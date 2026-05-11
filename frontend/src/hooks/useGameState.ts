@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { ApiStateResponse } from '@/types';
+import { apiUrl } from '@/lib/api';
 
 export function useGameState() {
   const [data, setData] = useState<ApiStateResponse | null>(null);
@@ -10,7 +11,7 @@ export function useGameState() {
   useEffect(() => {
     const fetchData = async () => {
       try {
-        const response = await fetch('http://localhost:8000/api/state');
+        const response = await fetch(apiUrl('/api/state'));
         if (!response.ok) {
           throw new Error(`HTTP error! status: ${response.status}`);
         }

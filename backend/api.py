@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -17,7 +21,7 @@ from .arena import (
     vote_to_start,
 )
 from .database import ensure_database, seed_demo
-from .llm_config import get_llm_settings
+from .llm_config import PROVIDER_OLLAMA, get_llm_settings
 from .model_rosters import list_model_rosters
 from .round_preloader import get_next_round_preload_status, run_next_round_preload, start_next_round_preload
 from .turn_controller import (
@@ -50,6 +54,10 @@ class ResetRequest(BaseModel):
     roster_preset: str | None = None
 
 
+class LLMSettingsRequest(BaseModel):
+    provider: str = Field(pattern="^(openrouter|ollama)$")
+
+
 class ArenaEntryRequest(BaseModel):
     wallet_address: str
     character_name: str
@@ -74,8 +82,12 @@ class ViewerStateRequest(BaseModel):
     phase: str | None = None
 
 
+APP_ROOT = Path(__file__).resolve().parent.parent
+FRONTEND_DIST = Path(os.environ.get("FRONTEND_DIST", APP_ROOT / "frontend" / "out"))
+
 app = FastAPI(title="LLM Survivor Turn API")
 app.mount("/media/voice", StaticFiles(directory=str(MEDIA_ROOT), check_dir=False), name="voice-media")
+app.mount("/_next", StaticFiles(directory=str(FRONTEND_DIST / "_next"), check_dir=False), name="next-static")
 
 app.add_middleware(
     CORSMiddleware,
@@ -104,6 +116,14 @@ def health() -> dict[str, str]:
 
 @app.get("/api/llm/settings")
 def api_llm_settings() -> dict:
+    return get_llm_settings().__dict__
+
+
+@app.post("/api/llm/settings")
+def api_llm_settings_update(request: LLMSettingsRequest) -> dict:
+    os.environ["LLM_PROVIDER"] = request.provider
+    if request.provider == PROVIDER_OLLAMA:
+        seed_demo(reset=True, roster_preset="local_ollama")
     return get_llm_settings().__dict__
 
 
@@ -241,7 +261,10 @@ def api_voice_status(
 
 @app.post("/api/dev/reset")
 def api_reset(request: ResetRequest | None = None) -> dict:
-    seed_demo(reset=True, roster_preset=request.roster_preset if request else None)
+    roster_preset = request.roster_preset if request else None
+    if get_llm_settings().provider == PROVIDER_OLLAMA and not roster_preset:
+        roster_preset = "local_ollama"
+    seed_demo(reset=True, roster_preset=roster_preset)
     return get_state()
 
 
@@ -315,3 +338,45 @@ def api_arena_resolve(season_id: str, request: ArenaResolveRequest) -> dict:
 def api_arena_reset() -> dict:
     seed_arena_demo(reset=True)
     return {"rooms": list_rooms()}
+
+
+def _resolve_frontend_file(frontend_path: str) -> Path | None:
+    if frontend_path.startswith(("api/", "media/")):
+        return None
+
+    if frontend_path in {"", "/"}:
+        candidate = FRONTEND_DIST / "index.html"
+    else:
+        safe_path = Path(frontend_path)
+        if safe_path.is_absolute() or ".." in safe_path.parts:
+            raise HTTPException(status_code=404, detail="Not Found")
+        candidate = FRONTEND_DIST / safe_path
+        if not candidate.suffix:
+            html_candidate = candidate.with_suffix(".html")
+            candidate = html_candidate if html_candidate.exists() else candidate / "index.html"
+        elif candidate.is_dir():
+            candidate = candidate / "index.html"
+
+    if candidate.exists() and candidate.is_file():
+        return candidate
+
+    fallback = FRONTEND_DIST / "index.html"
+    if fallback.exists():
+        return fallback
+    return None
+
+
+@app.get("/{frontend_path:path}", include_in_schema=False)
+def serve_frontend(frontend_path: str = ""):
+    candidate = _resolve_frontend_file(frontend_path)
+    if candidate:
+        return FileResponse(candidate)
+    raise HTTPException(status_code=404, detail="Frontend build not found")
+
+
+@app.head("/{frontend_path:path}", include_in_schema=False)
+def head_frontend(frontend_path: str = ""):
+    candidate = _resolve_frontend_file(frontend_path)
+    if candidate:
+        return FileResponse(candidate)
+    raise HTTPException(status_code=404, detail="Frontend build not found")

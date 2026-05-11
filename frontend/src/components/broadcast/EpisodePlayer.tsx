@@ -7,6 +7,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { DirectorControls } from "@/components/broadcast/DirectorControls";
 import { GameMetricsPanel } from "@/components/broadcast/GameMetricsPanel";
 import { SceneStage } from "@/components/broadcast/SceneStage";
+import { apiUrl, mediaUrl } from "@/lib/api";
 import type {
   ApiStateResponse,
   EpisodeResponse,
@@ -18,10 +19,8 @@ import type {
   VoiceTimelineLine,
 } from "@/types";
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
-
 async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${API_BASE}${path}`, {
+  const response = await fetch(apiUrl(path), {
     ...init,
     headers: {
       "Content-Type": "application/json",
@@ -36,7 +35,7 @@ async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 function resolveAudioUrl(audioUrl: string) {
-  return audioUrl.startsWith("http") ? audioUrl : `${API_BASE}${audioUrl}`;
+  return mediaUrl(audioUrl);
 }
 
 function playableTimeline(event: StoryEvent): VoiceTimelineLine[] {
@@ -54,6 +53,7 @@ export function EpisodePlayer() {
   const [state, setState] = useState<ApiStateResponse | null>(null);
   const [summary, setSummary] = useState<GameSummary | null>(null);
   const [rosters, setRosters] = useState<ModelRoster[]>([]);
+  const [selectedProvider, setSelectedProvider] = useState<"openrouter" | "ollama">("openrouter");
   const [selectedRoster, setSelectedRoster] = useState("default");
   const [currentIndex, setCurrentIndex] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -71,6 +71,9 @@ export function EpisodePlayer() {
     setState(stateData);
     setSummary(summaryData);
     setRosters(rosterData.rosters);
+    if (stateData.llm?.provider) {
+      setSelectedProvider(stateData.llm.provider);
+    }
     const viewerState = stateData.viewer_state;
     if (viewerState) {
       lastViewerStateRef.current = viewerState.updated_at;
@@ -294,6 +297,19 @@ export function EpisodePlayer() {
       nextRoundPreloadRequestedRef.current = false;
     });
 
+  const handleProviderChange = (provider: "openrouter" | "ollama") =>
+    runAction(async () => {
+      setSelectedProvider(provider);
+      if (provider === "ollama") {
+        setSelectedRoster("local_ollama");
+      }
+      await fetchJson("/api/llm/settings", {
+        method: "POST",
+        body: JSON.stringify({ provider }),
+      });
+      await refresh();
+    });
+
   const activeAgents = state?.agents.filter((agent) => agent.status === "active").length ?? 0;
   const totalAgents = state?.agents.length ?? 6;
   const phaseStep = state?.game.phase_step ?? "loading";
@@ -303,6 +319,11 @@ export function EpisodePlayer() {
     nextRoundPreload
       ? `R${nextRoundPreload.target_round} ${nextRoundPreload.status}`
       : "not queued";
+  const providerConfigured =
+    state?.llm?.provider === "ollama"
+      ? state.llm.ollama_configured
+      : Boolean(state?.llm?.openrouter_configured);
+  const providerLabel = state?.llm?.provider === "ollama" ? "Local Ollama" : "Live OpenRouter";
 
   return (
     <main className="broadcast-shell">
@@ -317,10 +338,10 @@ export function EpisodePlayer() {
         <div className="broadcast-meta">
           <div className="provider-status" aria-label="LLM response mode">
             <span>LLM Response Mode</span>
-            <strong className={state?.llm?.openrouter_configured ? "live" : "needs-key"}>
+            <strong className={providerConfigured ? "live" : "needs-key"}>
               <Sparkles size={15} />
-              Live OpenRouter
-              {state?.llm && !state.llm.openrouter_configured && <small>Needs key</small>}
+              {providerLabel}
+              {state?.llm && !providerConfigured && <small>{state.llm.provider === "ollama" ? "Needs Ollama" : "Needs key"}</small>}
             </strong>
           </div>
           <dl className="status-strip">
@@ -371,34 +392,6 @@ export function EpisodePlayer() {
       <section className="broadcast-layout">
         <div className="stage-column">
           <SceneStage event={currentEvent} agents={episode?.agents ?? []} reducedMotion={Boolean(reducedMotion)} />
-          <DirectorControls
-            isPlaying={isPlaying}
-            isBusy={isBusy}
-            canPlay={events.length > 0}
-            currentIndex={currentIndex}
-            totalEvents={events.length}
-            currentEvent={currentEvent}
-            onPlayPause={() => {
-              const nextPlaying = !isPlaying;
-              if (nextPlaying) {
-                requestNextRoundPreload();
-              }
-              setSharedPlayback(currentIndex, nextPlaying);
-            }}
-            onRestart={() => setSharedPlayback(0, false)}
-            onStepBack={() => setSharedPlayback(currentIndex - 1, false)}
-            onStepForward={() => setSharedPlayback(currentIndex + 1, false)}
-            onSkipToEnd={() => setSharedPlayback(Math.max(0, events.length - 1), false)}
-            onScrub={(index) => setSharedPlayback(index, false)}
-            onAdvanceTurn={handleAdvanceTurn}
-            onAutoRun={handleAutoRun}
-            onRunToFinale={handleRunToFinale}
-            onNextRound={handleNextRound}
-            onReset={handleReset}
-            rosters={rosters}
-            selectedRoster={selectedRoster}
-            onRosterChange={setSelectedRoster}
-          />
         </div>
 
         <aside className="control-column metrics-column" aria-label="Game metrics and state">
@@ -411,6 +404,37 @@ export function EpisodePlayer() {
           />
         </aside>
       </section>
+      <DirectorControls
+        isPlaying={isPlaying}
+        isBusy={isBusy}
+        canPlay={events.length > 0}
+        currentIndex={currentIndex}
+        totalEvents={events.length}
+        currentEvent={currentEvent}
+        events={events}
+        onPlayPause={() => {
+          const nextPlaying = !isPlaying;
+          if (nextPlaying) {
+            requestNextRoundPreload();
+          }
+          setSharedPlayback(currentIndex, nextPlaying);
+        }}
+        onRestart={() => setSharedPlayback(0, false)}
+        onStepBack={() => setSharedPlayback(currentIndex - 1, false)}
+        onStepForward={() => setSharedPlayback(currentIndex + 1, false)}
+        onSkipToEnd={() => setSharedPlayback(Math.max(0, events.length - 1), false)}
+        onScrub={(index) => setSharedPlayback(index, false)}
+        onAdvanceTurn={handleAdvanceTurn}
+        onAutoRun={handleAutoRun}
+        onRunToFinale={handleRunToFinale}
+        onNextRound={handleNextRound}
+        onReset={handleReset}
+        selectedProvider={selectedProvider}
+        onProviderChange={handleProviderChange}
+        rosters={rosters}
+        selectedRoster={selectedRoster}
+        onRosterChange={setSelectedRoster}
+      />
     </main>
   );
 }

@@ -121,6 +121,7 @@ export interface ApiStateResponse {
   llm?: LLMSettings;
   next_round_preload?: NextRoundPreloadStatus | null;
   viewer_state?: ViewerState | null;
+  social?: SocialSummary;
 }
 
 export interface GameSummary {
@@ -141,6 +142,7 @@ export interface GameSummary {
   votes_received: Record<string, number>;
   votes: Vote[];
   jury_votes: Array<Record<string, unknown>>;
+  social?: SocialSummary;
   finale_status: {
     is_finale: boolean;
     finalists: Agent[];
@@ -148,6 +150,33 @@ export interface GameSummary {
     remaining_eliminations_to_finale: number;
     winner_declared: boolean;
   };
+}
+
+export interface AllianceSummary {
+  alliance_id: string;
+  name: string;
+  round_created: number;
+  status: string;
+  strength: number;
+  summary: string;
+  member_ids: string[];
+}
+
+export interface GroupDiscussionSummary {
+  id: number;
+  round: number;
+  stage: string;
+  proposer_id: string;
+  target_size: number;
+  status: string;
+  privacy: string;
+  alliance_id?: string | null;
+  summary: string;
+}
+
+export interface SocialSummary {
+  alliances: AllianceSummary[];
+  group_discussions: GroupDiscussionSummary[];
 }
 
 export interface ModelRoster {
@@ -170,12 +199,21 @@ export interface ViewerState {
 }
 
 export interface LLMSettings {
-  provider: 'openrouter';
+  provider: 'openrouter' | 'ollama';
   openrouter_configured: boolean;
+  ollama_configured: boolean;
   default_model_id: string;
   timeout_seconds: number;
   site_url: string;
   app_name: string;
+  ollama_base_url: string;
+  ollama_host_model_id: string;
+  ollama_available_models: string[];
+  ollama_required_models: string[];
+  ollama_missing_models: string[];
+  ollama_keep_alive: string;
+  ollama_num_ctx: number;
+  ollama_timeout_seconds: number;
 }
 
 export interface NextRoundPreloadStatus {

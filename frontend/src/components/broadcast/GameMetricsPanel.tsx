@@ -34,6 +34,49 @@ function readString(payload: Record<string, unknown>, key: string) {
   return typeof value === "string" && value.trim().length > 0 ? value : null;
 }
 
+function readNumber(payload: Record<string, unknown>, key: string) {
+  const value = payload[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function collectStrategySignals(events: StoryEvent[]) {
+  const scores: number[] = [];
+  let latestProfile: string | null = null;
+
+  events.forEach((event) => {
+    const score = readNumber(event.payload, "strategic_score");
+    if (score !== null) {
+      scores.push(score);
+    }
+
+    const profile = readString(event.payload, "prompt_profile");
+    if (profile) {
+      latestProfile = profile;
+    }
+
+    const lineMetadata = event.payload.speaker_line_metadata;
+    if (Array.isArray(lineMetadata)) {
+      lineMetadata.forEach((line) => {
+        if (!line || typeof line !== "object" || Array.isArray(line)) {
+          return;
+        }
+        const metadata = line as Record<string, unknown>;
+        const lineScore = readNumber(metadata, "strategic_score");
+        if (lineScore !== null) {
+          scores.push(lineScore);
+        }
+        const lineProfile = readString(metadata, "prompt_profile");
+        if (lineProfile) {
+          latestProfile = lineProfile;
+        }
+      });
+    }
+  });
+
+  const average = scores.length > 0 ? scores.reduce((total, score) => total + score, 0) / scores.length : null;
+  return { average, count: scores.length, latestProfile };
+}
+
 function readVoteAnalysis(payload: Record<string, unknown>) {
   const value = payload.ui_vote_analysis;
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -166,6 +209,7 @@ export function GameMetricsPanel({ state, summary, events, currentIndex, runtime
   const progressPercent = events.length > 0 ? ((currentIndex + 1) / events.length) * 100 : 0;
   const visibleEvents = events.slice(0, currentIndex + 1);
   const dynamics = buildDynamics(state, visibleEvents, currentEvent);
+  const strategySignals = collectStrategySignals(visibleEvents);
   const latestChallenge = summary?.round_history
     .map((round) => round.challenge_result)
     .filter(Boolean)
@@ -202,7 +246,15 @@ export function GameMetricsPanel({ state, summary, events, currentIndex, runtime
           </div>
           <div>
             <dt>LLM Calls</dt>
-            <dd>{state.llm?.openrouter_configured ? "live" : "needs key"}</dd>
+            <dd>
+              {state.llm?.provider === "ollama"
+                ? state.llm.ollama_configured
+                  ? "local live"
+                  : "needs models"
+                : state.llm?.openrouter_configured
+                  ? "live"
+                  : "needs key"}
+            </dd>
           </div>
           <div>
             <dt>Challenge Result</dt>
@@ -239,10 +291,16 @@ export function GameMetricsPanel({ state, summary, events, currentIndex, runtime
               : `Preparing round ${state.next_round_preload.target_round} responses in the background.`}
           </p>
         )}
-        {state.llm && !state.llm.openrouter_configured && (
+        {state.llm?.provider === "openrouter" && !state.llm.openrouter_configured && (
           <p className="timeline-now">
             <Brain size={13} />
             Backend needs an OpenRouter API key before live model calls run.
+          </p>
+        )}
+        {state.llm?.provider === "ollama" && !state.llm.ollama_configured && (
+          <p className="timeline-now">
+            <Brain size={13} />
+            Local Ollama needs: {state.llm.ollama_missing_models.join(", ") || "models"}
           </p>
         )}
         {currentEvent && (
@@ -252,6 +310,29 @@ export function GameMetricsPanel({ state, summary, events, currentIndex, runtime
           </p>
         )}
       </section>
+
+      {(strategySignals.count > 0 || strategySignals.latestProfile) && (
+        <section className="debug-card strategy-quality-card">
+          <h2>
+            <Brain size={16} />
+            Agent Strategy Quality
+          </h2>
+          <dl>
+            <div>
+              <dt>Prompt Profile</dt>
+              <dd>{strategySignals.latestProfile ?? "waiting"}</dd>
+            </div>
+            <div>
+              <dt>Scored Actions</dt>
+              <dd>{strategySignals.count}</dd>
+            </div>
+            <div>
+              <dt>Avg Strategy Score</dt>
+              <dd>{strategySignals.average !== null ? strategySignals.average.toFixed(2) : "pending"}</dd>
+            </div>
+          </dl>
+        </section>
+      )}
 
       {(latestChallenge || immunityNames.length > 0 || winnerName) && (
         <section className="debug-card season-result-card">

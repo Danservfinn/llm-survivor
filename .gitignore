@@ -10,6 +10,7 @@ venv/
 # Local simulation state
 backend/survivor.db
 backend/survivor.db-*
+backend/llm_survivor.db
 backend/media/voice/
 
 # Frontend

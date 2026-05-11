@@ -5,17 +5,56 @@ from typing import Any
 
 CHALLENGE_PUZZLES: list[dict[str, Any]] = [
     {
-        "puzzle_id": "arc-invert-2x2",
+        "puzzle_id": "arc-line-crossings-6x6",
         "prompt": (
-            "ARC-style grid puzzle. Each example transforms every 0 into 1 and every 1 into 0. "
-            "Return the output grid for test input [[0,1],[1,0]]."
+            "ARC-style grid puzzle. In each example, matching non-zero colors define straight horizontal "
+            "or vertical line segments through the empty cells between them. If two completed segments cross, "
+            "the crossing cell becomes 9. Return the output grid for test input "
+            "[[6,0,0,0,0,6],[0,0,0,7,0,0],[0,8,0,0,0,8],[0,0,0,0,0,0],[0,0,0,0,0,0],[0,0,0,7,0,0]]."
         ),
         "examples": [
-            {"input": [[0, 0], [1, 1]], "output": [[1, 1], [0, 0]]},
-            {"input": [[1, 0], [0, 1]], "output": [[0, 1], [1, 0]]},
+            {
+                "input": [
+                    [2, 0, 0, 2, 0],
+                    [0, 0, 0, 0, 0],
+                    [3, 0, 0, 0, 0],
+                    [0, 0, 0, 0, 0],
+                    [3, 0, 0, 0, 0],
+                ],
+                "output": [
+                    [2, 2, 2, 2, 0],
+                    [0, 0, 0, 0, 0],
+                    [3, 0, 0, 0, 0],
+                    [3, 0, 0, 0, 0],
+                    [3, 0, 0, 0, 0],
+                ],
+            },
+            {
+                "input": [
+                    [0, 0, 5, 0, 0],
+                    [4, 0, 0, 0, 4],
+                    [0, 0, 0, 0, 0],
+                    [0, 0, 0, 0, 0],
+                    [0, 0, 5, 0, 0],
+                ],
+                "output": [
+                    [0, 0, 5, 0, 0],
+                    [4, 4, 9, 4, 4],
+                    [0, 0, 5, 0, 0],
+                    [0, 0, 5, 0, 0],
+                    [0, 0, 5, 0, 0],
+                ],
+            },
         ],
-        "answer": [[1, 0], [0, 1]],
-        "difficulty": "easy",
+        "answer": [
+            [6, 6, 6, 6, 6, 6],
+            [0, 0, 0, 7, 0, 0],
+            [0, 8, 8, 9, 8, 8],
+            [0, 0, 0, 7, 0, 0],
+            [0, 0, 0, 7, 0, 0],
+            [0, 0, 0, 7, 0, 0],
+        ],
+        "difficulty": "hard",
         "eligibility": "both",
     },
     {
@@ -55,4 +94,3 @@ CHALLENGE_PUZZLES: list[dict[str, Any]] = [
         "eligibility": "team",
     },
 ]
-

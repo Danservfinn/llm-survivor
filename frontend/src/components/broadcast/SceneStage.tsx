@@ -52,7 +52,7 @@ export function SceneStage({ event, agents, reducedMotion }: SceneStageProps) {
           exit={{ opacity: 0 }}
           transition={{ duration: reducedMotion ? 0.05 : 0.18, ease: "easeOut" }}
         >
-          {event.kind === "conversation" && <ConversationScene event={event} getAgent={getAgent} />}
+          {event.kind === "conversation" && <ConversationScene event={event} getAgent={getAgent} agents={agents} />}
           {(event.kind === "confessional" || event.kind === "exit_confessional") && (
             <ConfessionalFrame event={event} getAgent={getAgent} host={HOST_AGENT} />
           )}
@@ -60,7 +60,9 @@ export function SceneStage({ event, agents, reducedMotion }: SceneStageProps) {
           {event.kind !== "conversation" &&
             event.kind !== "confessional" &&
             event.kind !== "exit_confessional" &&
-            event.kind !== "vote_reveal" && <TribalCouncilScene event={event} getAgent={getAgent} host={HOST_AGENT} />}
+            event.kind !== "vote_reveal" && (
+              <TribalCouncilScene event={event} getAgent={getAgent} host={HOST_AGENT} agents={agents} />
+            )}
         </motion.div>
       </AnimatePresence>
     </div>
