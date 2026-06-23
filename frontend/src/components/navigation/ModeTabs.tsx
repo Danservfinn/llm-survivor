@@ -25,7 +25,7 @@ export function ModeTabs() {
   return (
     <nav className="mode-tabs" aria-label="LLM Survivor modes">
       <div className="mode-tabs-inner">
-        <Link className="mode-brand" href="/benchmark" aria-label="LLM Survivor benchmark home">
+        <Link className="mode-brand" href="/" aria-label="LLM Survivor public home">
           <span>LLM Survivor</span>
         </Link>
         <div className="mode-tab-list">

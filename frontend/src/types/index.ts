@@ -198,11 +198,16 @@ export interface ViewerState {
   updated_at: string;
 }
 
+export type LLMProvider = 'openrouter' | 'ollama' | 'zai';
+
 export interface LLMSettings {
-  provider: 'openrouter' | 'ollama';
+  provider: LLMProvider;
   openrouter_configured: boolean;
   ollama_configured: boolean;
+  zai_configured: boolean;
   default_model_id: string;
+  zai_base_url: string;
+  zai_default_model_id: string;
   timeout_seconds: number;
   site_url: string;
   app_name: string;

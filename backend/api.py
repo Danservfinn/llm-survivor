@@ -21,7 +21,7 @@ from .arena import (
     vote_to_start,
 )
 from .database import ensure_database, seed_demo
-from .llm_config import PROVIDER_OLLAMA, get_llm_settings
+from .llm_config import PROVIDER_OLLAMA, PROVIDER_ZAI, get_llm_settings, redact_secrets as redact_llm_secrets
 from .model_rosters import list_model_rosters
 from .round_preloader import get_next_round_preload_status, run_next_round_preload, start_next_round_preload
 from .turn_controller import (
@@ -45,7 +45,7 @@ class AutoRunRequest(BaseModel):
 
 class AutoRunToEndRequest(BaseModel):
     max_rounds: int = Field(default=8, ge=1, le=20)
-    max_turns: int = Field(default=250, ge=1, le=500)
+    max_turns: int = Field(default=250, ge=1, le=2000)
     max_live_calls: int = Field(default=200, ge=0, le=1000)
     max_estimated_cost_cents: float = Field(default=200.0, ge=0, le=10000)
 
@@ -55,7 +55,7 @@ class ResetRequest(BaseModel):
 
 
 class LLMSettingsRequest(BaseModel):
-    provider: str = Field(pattern="^(openrouter|ollama)$")
+    provider: str = Field(pattern="^(openrouter|ollama|zai)$")
 
 
 class ArenaEntryRequest(BaseModel):
@@ -124,6 +124,8 @@ def api_llm_settings_update(request: LLMSettingsRequest) -> dict:
     os.environ["LLM_PROVIDER"] = request.provider
     if request.provider == PROVIDER_OLLAMA:
         seed_demo(reset=True, roster_preset="local_ollama")
+    if request.provider == PROVIDER_ZAI:
+        seed_demo(reset=True, roster_preset="zai_glm")
     return get_llm_settings().__dict__
 
 
@@ -262,8 +264,11 @@ def api_voice_status(
 @app.post("/api/dev/reset")
 def api_reset(request: ResetRequest | None = None) -> dict:
     roster_preset = request.roster_preset if request else None
-    if get_llm_settings().provider == PROVIDER_OLLAMA and not roster_preset:
+    settings = get_llm_settings()
+    if settings.provider == PROVIDER_OLLAMA and not roster_preset:
         roster_preset = "local_ollama"
+    if settings.provider == PROVIDER_ZAI and not roster_preset:
+        roster_preset = "zai_glm"
     seed_demo(reset=True, roster_preset=roster_preset)
     return get_state()
 

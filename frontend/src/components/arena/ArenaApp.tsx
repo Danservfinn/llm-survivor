@@ -15,14 +15,14 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
+import { apiUrl } from "@/lib/api";
 import type { ArenaEntry, ArenaRoom, ArenaSeasonManifest } from "@/types";
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 const ROOM_ID = "room-demo";
 const DEMO_WALLET = "0xabc12345";
 
 async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${API_BASE}${path}`, {
+  const response = await fetch(apiUrl(path), {
     ...init,
     headers: {
       "Content-Type": "application/json",
@@ -179,7 +179,7 @@ export function ArenaApp() {
               <Vote size={16} />
               Vote Start
             </button>
-            <button type="button" className="primary" onClick={startRoom} disabled={isBusy || !canStart}>
+            <button type="button" className="primary" onClick={startRoom} disabled={isBusy || room?.status !== "open" || !canStart}>
               <Play size={16} />
               Fill CPU + Start
             </button>
@@ -243,7 +243,12 @@ export function ArenaApp() {
                 </option>
               ))}
             </select>
-            <button type="button" className="primary" onClick={() => resolveSeason(selectedWinner)} disabled={!manifest || !selectedWinner || isBusy}>
+            <button
+              type="button"
+              className="primary"
+              onClick={() => resolveSeason(selectedWinner)}
+              disabled={!manifest || manifest.season.status === "completed" || !selectedWinner || isBusy}
+            >
               <ReceiptText size={16} />
               Resolve Season
             </button>

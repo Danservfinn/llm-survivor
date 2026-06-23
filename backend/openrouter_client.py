@@ -9,7 +9,7 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any
 
-from .llm_config import PROVIDER_OLLAMA, PROVIDER_OPENROUTER, get_llm_settings, redact_secrets
+from .llm_config import PROVIDER_OLLAMA, PROVIDER_OPENROUTER, PROVIDER_ZAI, get_llm_settings, redact_secrets
 
 OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
 AGENT_PROMPT_PROFILE_ID = "win-max-v2-strategy-contract"
@@ -631,11 +631,13 @@ def _request_minimal_agent_action_with_model(
         f"- {target['agent_id']}: {target['pseudonym']}"
         for target in allowed_targets
     )
+    first_allowed_target_id = allowed_targets[0]["agent_id"] if allowed_targets else None
     target_instruction = (
-        "Pick exactly one target_id from Allowed targets."
+        "Pick exactly one target_id from Allowed targets. Do not return null."
         if response_kind in {"vote", "jury_vote"}
         else "Use target_id only if you name one allowed target; otherwise use null."
     )
+    target_example = f'"{first_allowed_target_id}"' if response_kind in {"vote", "jury_vote"} and first_allowed_target_id else "null"
     prompt = f"""
 You are {actor['pseudonym']} in an original island social-strategy benchmark.
 
@@ -654,7 +656,7 @@ Return JSON only:
 {{
   "dialogue": "one or two first-person sentences I say aloud now",
   "strategic_summary": "one private first-person sentence explaining my decisive strategic read",
-  "target_id": null,
+  "target_id": {target_example},
   "move_type": "reassure_ally",
   "intended_effect": "short concrete purpose",
   "confidence": 0.5
@@ -1076,6 +1078,8 @@ def _post_chat_completion(payload: dict[str, Any], api_key: str | None) -> dict[
     settings = get_llm_settings()
     if settings.provider == PROVIDER_OLLAMA:
         return _post_ollama_chat(payload, settings)
+    if settings.provider == PROVIDER_ZAI:
+        return _post_zai_chat(payload, settings)
     if not api_key:
         raise RuntimeError("OPENROUTER_API_KEY is required for real OpenRouter calls")
     outbound_payload = {key: value for key, value in payload.items() if not key.startswith("_")}
@@ -1097,6 +1101,32 @@ def _post_chat_completion(payload: dict[str, Any], api_key: str | None) -> dict[
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
         raise RuntimeError(redact_secrets(RuntimeError(f"OpenRouter HTTP {exc.code}: {body}"))) from exc
+    except Exception as exc:
+        raise RuntimeError(redact_secrets(exc)) from exc
+
+
+def _post_zai_chat(payload: dict[str, Any], settings) -> dict[str, Any]:
+    api_key = os.environ.get("ZAI_API_KEY") or os.environ.get("GLM_API_KEY")
+    if not api_key:
+        raise RuntimeError("ZAI_API_KEY or GLM_API_KEY is required for real Z.ai calls")
+    outbound_payload = {key: value for key, value in payload.items() if not key.startswith("_")}
+    if payload.get("_response_format") != "text":
+        outbound_payload.setdefault("response_format", {"type": "json_object"})
+    request = urllib.request.Request(
+        f"{settings.zai_base_url}/chat/completions",
+        data=json.dumps(outbound_payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=settings.timeout_seconds, context=_ssl_context()) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(redact_secrets(RuntimeError(f"Z.ai HTTP {exc.code}: {body}"))) from exc
     except Exception as exc:
         raise RuntimeError(redact_secrets(exc)) from exc
 
@@ -1146,6 +1176,8 @@ def _post_ollama_chat(payload: dict[str, Any], settings) -> dict[str, Any]:
 def _host_model_id(settings) -> str:
     if settings.provider == PROVIDER_OLLAMA:
         return settings.ollama_host_model_id
+    if settings.provider == PROVIDER_ZAI:
+        return settings.zai_default_model_id
     return settings.default_model_id
 
 

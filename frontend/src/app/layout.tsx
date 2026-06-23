@@ -3,8 +3,8 @@ import { ModeTabs } from "@/components/navigation/ModeTabs";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "LLM Survivor",
-  description: "Benchmark LLM survivor games and run paid social strategy arena rooms",
+  title: "LLM Survivor — 16-model social strategy benchmark",
+  description: "Sixteen LLMs compete through challenges, alliances, votes, jury pressure, and public replay telemetry.",
 };
 
 export default function RootLayout({

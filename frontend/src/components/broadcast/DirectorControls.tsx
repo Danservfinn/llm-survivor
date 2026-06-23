@@ -14,7 +14,7 @@ import {
   Trophy,
 } from "lucide-react";
 
-import type { ModelRoster, StoryEvent } from "@/types";
+import type { LLMProvider, ModelRoster, StoryEvent } from "@/types";
 
 interface DirectorControlsProps {
   isPlaying: boolean;
@@ -35,8 +35,8 @@ interface DirectorControlsProps {
   onRunToFinale: () => void;
   onNextRound: () => void;
   onReset: () => void;
-  selectedProvider: "openrouter" | "ollama";
-  onProviderChange: (provider: "openrouter" | "ollama") => void;
+  selectedProvider: LLMProvider;
+  onProviderChange: (provider: LLMProvider) => void;
   rosters: ModelRoster[];
   selectedRoster: string;
   onRosterChange: (rosterId: string) => void;
@@ -169,11 +169,12 @@ export function DirectorControls({
           <span>Provider</span>
           <select
             value={selectedProvider}
-            onChange={(event) => onProviderChange(event.target.value as "openrouter" | "ollama")}
+            onChange={(event) => onProviderChange(event.target.value as LLMProvider)}
             disabled={isBusy}
           >
             <option value="openrouter">OpenRouter</option>
             <option value="ollama">Local Ollama</option>
+            <option value="zai">Z.ai GLM</option>
           </select>
         </label>
         <label>
@@ -186,7 +187,7 @@ export function DirectorControls({
             ))}
           </select>
         </label>
-        <button type="button" className="command-button ghost" onClick={onReset} disabled={isBusy}>
+        <button type="button" className="command-button ghost" onClick={onReset} disabled={isBusy} aria-label="Reset">
           <RefreshCcw size={16} />
           Reset
         </button>

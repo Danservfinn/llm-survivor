@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -1047,6 +1048,18 @@ def _phase_steps(conn, state: dict[str, Any]) -> list[str]:
     voters = _round_voter_ids(conn, state["current_round"])
     vote_booth_steps = [f"vote_booth_{voter_id}" for voter_id in voters]
     vote_reveal_steps = [f"vote_reveal_{index + 1}" for index in range(len(voters))]
+    if os.environ.get("LLM_SURVIVOR_FAST_BENCHMARK") == "1":
+        return [
+            "camp_pre_challenge_read",
+            "challenge_intro",
+            "challenge_attempts",
+            "challenge_result",
+            "tribal_vote_call",
+            *vote_booth_steps,
+            *vote_reveal_steps,
+            "elimination",
+            "memory_update",
+        ]
     return [*ROUND_OPENING_STEPS, *PRE_VOTE_STEPS, *vote_booth_steps, *vote_reveal_steps, *POST_VOTE_STEPS]
 
 
@@ -2382,11 +2395,27 @@ def _ensure_challenge_result(conn, round_number: int) -> dict[str, Any]:
         puzzle_id = winner_attempt["puzzle_id"]
     else:
         if should_use_live_llm():
-            raise RuntimeError("No live challenge attempt solved the puzzle; refusing to create a deterministic challenge winner.")
-        active = _active_agent_rows(conn)
-        winning_agent_id = active[(round_number - 7) % len(active)]["agent_id"]
-        status = "deterministic"
-        puzzle_id = puzzle["puzzle_id"]
+            if not attempts:
+                raise RuntimeError("No live challenge attempts were recorded; cannot score challenge.")
+            # Real-model benchmark mode: never insert a scripted/deterministic winner,
+            # but do allow the game to continue when every live model misses the exact
+            # puzzle answer. Rank the recorded live attempts by fastest response, then
+            # stable attempt order. The result remains auditable via ChallengeAttempts
+            # and the status explicitly marks that no model solved the challenge.
+            sorted_attempts = sorted(
+                [attempt for attempt in attempts if attempt is not None],
+                key=lambda row: (row["response_ms"], row["attempt_order"], row["agent_id"]),
+            )
+            winner_attempt = sorted_attempts[0]
+            assert winner_attempt is not None
+            winning_agent_id = winner_attempt["agent_id"]
+            status = f"{winner_attempt['provider']}_unsolved_fastest"
+            puzzle_id = winner_attempt["puzzle_id"]
+        else:
+            active = _active_agent_rows(conn)
+            winning_agent_id = active[(round_number - 7) % len(active)]["agent_id"]
+            status = "deterministic"
+            puzzle_id = puzzle["puzzle_id"]
 
     teams = _team_assignments(conn)
     winning_tribe_id = teams.get(winning_agent_id) if challenge_type == "team" else None
@@ -3751,12 +3780,26 @@ def _resolve_vote_decision(conn, voter_id: str, step: str) -> VoteDecision:
         response_kind="vote",
         episode_context=agent_context,
     )
-    if not action or not action.target_id:
-        raise RuntimeError(
-            f"Live vote generation failed for {_agent_name(conn, voter_id)}; "
-            "no scripted vote target or explanation was inserted."
-        )
     provider = live_llm_provider()
+    if not action or not action.target_id:
+        # Real-model benchmark mode should not halt because a small local model
+        # failed the structured vote contract. Treat this as a model error,
+        # mark it in provider metadata, and assign the normal fallback target as
+        # a penalty vote so the season can advance without pretending the model
+        # made a valid strategic choice.
+        return VoteDecision(
+            fallback_target,
+            "Invalid live vote: I failed to choose a legal target, so the benchmark assigned my default penalty vote.",
+            f"{provider}_invalid_vote",
+            action.model_id if action else (actor_row["model_id"] if (actor_row := _agent_row(conn, voter_id)) else None),
+            context_digest(agent_context),
+            strategic_summary="Invalid structured vote response; benchmark penalty vote assigned.",
+            move_type="invalid_vote",
+            intended_effect="penalize invalid structured vote response while keeping the live benchmark running",
+            confidence=0.0,
+            strategic_score=0.0,
+            prompt_profile=getattr(action, "prompt_profile", None) if action else None,
+        )
     _maybe_store_action_archetype(conn, voter_id, round_number, action)
     return VoteDecision(
         action.target_id,

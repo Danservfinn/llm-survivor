@@ -251,6 +251,10 @@ export function GameMetricsPanel({ state, summary, events, currentIndex, runtime
                 ? state.llm.ollama_configured
                   ? "local live"
                   : "needs models"
+                : state.llm?.provider === "zai"
+                  ? state.llm.zai_configured
+                    ? "zai live"
+                    : "needs Z.ai key"
                 : state.llm?.openrouter_configured
                   ? "live"
                   : "needs key"}
@@ -301,6 +305,12 @@ export function GameMetricsPanel({ state, summary, events, currentIndex, runtime
           <p className="timeline-now">
             <Brain size={13} />
             Local Ollama needs: {state.llm.ollama_missing_models.join(", ") || "models"}
+          </p>
+        )}
+        {state.llm?.provider === "zai" && !state.llm.zai_configured && (
+          <p className="timeline-now">
+            <Brain size={13} />
+            Backend needs a Z.ai API key before live GLM calls run.
           </p>
         )}
         {currentEvent && (

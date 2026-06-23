@@ -71,6 +71,16 @@ FREE_OPENROUTER_MODELS = [
 
 LOCAL_OLLAMA_MODELS = [
     {
+        "model_id": "smollm2:1.7b",
+        "display_name": "SmolLM2 1.7B Local",
+        "status": "local_ollama",
+    },
+    {
+        "model_id": "gemma3:1b",
+        "display_name": "Gemma 3 1B Local",
+        "status": "local_ollama",
+    },
+    {
         "model_id": "qwen2.5:1.5b",
         "display_name": "Qwen 2.5 1.5B Local",
         "status": "local_ollama",
@@ -80,25 +90,28 @@ LOCAL_OLLAMA_MODELS = [
         "display_name": "Llama 3.2 1B Local",
         "status": "local_ollama",
     },
+]
+
+ZAI_GLM_MODELS = [
     {
-        "model_id": "gemma3:1b",
-        "display_name": "Gemma 3 1B Local",
-        "status": "local_ollama",
+        "model_id": "glm-4.5-flash",
+        "display_name": "GLM Flash Alpha",
+        "status": "zai_glm",
     },
     {
-        "model_id": "smollm2:1.7b",
-        "display_name": "SmolLM2 1.7B Local",
-        "status": "local_ollama",
+        "model_id": "glm-4.5-flash",
+        "display_name": "GLM Flash Beta",
+        "status": "zai_glm",
     },
     {
-        "model_id": "phi3.5:3.8b",
-        "display_name": "Phi 3.5 3.8B Local",
-        "status": "local_ollama",
+        "model_id": "glm-4.5-flash",
+        "display_name": "GLM Flash Gamma",
+        "status": "zai_glm",
     },
     {
-        "model_id": "qwen2.5:3b",
-        "display_name": "Qwen 2.5 3B Local",
-        "status": "local_ollama",
+        "model_id": "glm-4.5-flash",
+        "display_name": "GLM Flash Delta",
+        "status": "zai_glm",
     },
 ]
 
@@ -132,6 +145,11 @@ def list_model_rosters() -> list[dict[str, Any]]:
             "name": "All Local Ollama Models",
             "models": LOCAL_OLLAMA_MODELS,
         },
+        {
+            "id": "zai_glm",
+            "name": "Z.ai GLM Smoke Roster",
+            "models": ZAI_GLM_MODELS,
+        },
     ]
 
 
@@ -142,6 +160,8 @@ def agents_for_roster(roster_preset: str | None = None) -> list[dict[str, Any]]:
         return _agents_for_models(FREE_OPENROUTER_MODELS)
     if roster_preset == "local_ollama":
         return _agents_for_models(LOCAL_OLLAMA_MODELS)
+    if roster_preset == "zai_glm":
+        return _agents_for_models(ZAI_GLM_MODELS)
     return deepcopy(DEMO_AGENTS)
 
 
@@ -179,6 +199,8 @@ def _archetype_for_model(display_name: str) -> str:
         return "quiet vote broker"
     if "DeepSeek" in display_name:
         return "risk calculator"
+    if "GLM" in display_name:
+        return "formal planner"
     if "Local" in display_name:
         return "local strategist"
     return "lean social player"

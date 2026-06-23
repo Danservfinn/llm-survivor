@@ -18,7 +18,7 @@ class RoundPreloaderTest(unittest.TestCase):
         self.temp_dir.cleanup()
 
     def test_preload_generates_next_round_buffer_without_advancing_replay(self) -> None:
-        turn_controller.auto_run(40)
+        turn_controller.auto_run(90)
         before = turn_controller.get_state()
 
         status = round_preloader.start_next_round_preload(run_inline=True)
@@ -28,14 +28,15 @@ class RoundPreloaderTest(unittest.TestCase):
         self.assertEqual(status["source_round"], 7)
         self.assertEqual(status["target_round"], 8)
         self.assertEqual(status["provider"], "deterministic")
-        self.assertEqual(status["event_count"], 6)
+        active_count = len([agent for agent in before["agents"] if agent["status"] == "active"])
+        self.assertGreaterEqual(status["event_count"], active_count)
         self.assertEqual(before["game"], after["game"])
         self.assertEqual(before["turn_count"], after["turn_count"])
         self.assertEqual(before["story_event_count"], after["story_event_count"])
         self.assertEqual(after["next_round_preload"]["status"], "complete")
 
     def test_state_exposes_preload_status_without_raw_responses(self) -> None:
-        turn_controller.auto_run(40)
+        turn_controller.auto_run(90)
         round_preloader.start_next_round_preload(run_inline=True)
 
         state = turn_controller.get_state()
@@ -49,7 +50,7 @@ class RoundPreloaderTest(unittest.TestCase):
         self.assertNotIn("generated_payload", state_text)
 
     def test_repeated_preload_start_reuses_completed_buffer(self) -> None:
-        turn_controller.auto_run(40)
+        turn_controller.auto_run(90)
         first = round_preloader.start_next_round_preload(run_inline=True)
         second = round_preloader.start_next_round_preload(run_inline=True)
 

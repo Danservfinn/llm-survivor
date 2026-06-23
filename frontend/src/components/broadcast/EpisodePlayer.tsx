@@ -12,6 +12,7 @@ import type {
   ApiStateResponse,
   EpisodeResponse,
   GameSummary,
+  LLMProvider,
   ModelRoster,
   NextRoundPreloadStatus,
   StoryEvent,
@@ -53,7 +54,7 @@ export function EpisodePlayer() {
   const [state, setState] = useState<ApiStateResponse | null>(null);
   const [summary, setSummary] = useState<GameSummary | null>(null);
   const [rosters, setRosters] = useState<ModelRoster[]>([]);
-  const [selectedProvider, setSelectedProvider] = useState<"openrouter" | "ollama">("openrouter");
+  const [selectedProvider, setSelectedProvider] = useState<LLMProvider>("openrouter");
   const [selectedRoster, setSelectedRoster] = useState("default");
   const [currentIndex, setCurrentIndex] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -73,6 +74,11 @@ export function EpisodePlayer() {
     setRosters(rosterData.rosters);
     if (stateData.llm?.provider) {
       setSelectedProvider(stateData.llm.provider);
+      if (stateData.llm.provider === "ollama") {
+        setSelectedRoster("local_ollama");
+      } else if (stateData.llm.provider === "zai") {
+        setSelectedRoster("zai_glm");
+      }
     }
     const viewerState = stateData.viewer_state;
     if (viewerState) {
@@ -255,7 +261,7 @@ export function EpisodePlayer() {
     runAction(async () => {
       await fetchJson("/api/turns/auto-run", {
         method: "POST",
-        body: JSON.stringify({ max_turns: 40 }),
+        body: JSON.stringify({ max_turns: 90 }),
       });
       const nextEpisode = await refresh();
       setSharedPlayback(nextEpisode.events.length > 0 ? 0 : currentIndex, false);
@@ -266,9 +272,9 @@ export function EpisodePlayer() {
       await fetchJson("/api/game/auto-run-to-end", {
         method: "POST",
         body: JSON.stringify({
-          max_rounds: 8,
-          max_turns: 260,
-          max_live_calls: 220,
+          max_rounds: 16,
+          max_turns: 1200,
+          max_live_calls: 1000,
           max_estimated_cost_cents: 500,
         }),
       });
@@ -297,11 +303,13 @@ export function EpisodePlayer() {
       nextRoundPreloadRequestedRef.current = false;
     });
 
-  const handleProviderChange = (provider: "openrouter" | "ollama") =>
+  const handleProviderChange = (provider: LLMProvider) =>
     runAction(async () => {
       setSelectedProvider(provider);
       if (provider === "ollama") {
         setSelectedRoster("local_ollama");
+      } else if (provider === "zai") {
+        setSelectedRoster("zai_glm");
       }
       await fetchJson("/api/llm/settings", {
         method: "POST",
@@ -322,8 +330,21 @@ export function EpisodePlayer() {
   const providerConfigured =
     state?.llm?.provider === "ollama"
       ? state.llm.ollama_configured
-      : Boolean(state?.llm?.openrouter_configured);
-  const providerLabel = state?.llm?.provider === "ollama" ? "Local Ollama" : "Live OpenRouter";
+      : state?.llm?.provider === "zai"
+        ? state.llm.zai_configured
+        : Boolean(state?.llm?.openrouter_configured);
+  const providerLabel =
+    state?.llm?.provider === "ollama"
+      ? "Local Ollama"
+      : state?.llm?.provider === "zai"
+        ? "Z.ai GLM"
+        : "Live OpenRouter";
+  const providerNeedsLabel =
+    state?.llm?.provider === "ollama"
+      ? "Needs Ollama"
+      : state?.llm?.provider === "zai"
+        ? "Needs Z.ai key"
+        : "Needs key";
 
   return (
     <main className="broadcast-shell">
@@ -341,7 +362,7 @@ export function EpisodePlayer() {
             <strong className={providerConfigured ? "live" : "needs-key"}>
               <Sparkles size={15} />
               {providerLabel}
-              {state?.llm && !providerConfigured && <small>{state.llm.provider === "ollama" ? "Needs Ollama" : "Needs key"}</small>}
+              {state?.llm && !providerConfigured && <small>{providerNeedsLabel}</small>}
             </strong>
           </div>
           <dl className="status-strip">

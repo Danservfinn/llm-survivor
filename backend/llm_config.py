@@ -9,8 +9,9 @@ from dataclasses import dataclass
 
 PROVIDER_OPENROUTER = "openrouter"
 PROVIDER_OLLAMA = "ollama"
+PROVIDER_ZAI = "zai"
 PROVIDER_DETERMINISTIC = "deterministic"
-SUPPORTED_PROVIDERS = {PROVIDER_OPENROUTER, PROVIDER_OLLAMA, PROVIDER_DETERMINISTIC}
+SUPPORTED_PROVIDERS = {PROVIDER_OPENROUTER, PROVIDER_OLLAMA, PROVIDER_ZAI, PROVIDER_DETERMINISTIC}
 
 
 @dataclass(frozen=True)
@@ -18,7 +19,10 @@ class LLMSettings:
     provider: str
     openrouter_configured: bool
     ollama_configured: bool
+    zai_configured: bool
     default_model_id: str
+    zai_base_url: str
+    zai_default_model_id: str
     timeout_seconds: float
     site_url: str
     app_name: str
@@ -38,6 +42,7 @@ def get_llm_settings() -> LLMSettings:
         provider = PROVIDER_OPENROUTER
     ollama_base_url = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
     ollama_host_model_id = os.environ.get("OLLAMA_HOST_MODEL", "qwen2.5:1.5b")
+    zai_base_url = os.environ.get("ZAI_BASE_URL", "https://open.bigmodel.cn/api/paas/v4").rstrip("/")
     ollama_available_models = _available_ollama_models(ollama_base_url)
     ollama_required_models = _required_ollama_models(ollama_host_model_id)
     ollama_missing_models = [
@@ -47,7 +52,10 @@ def get_llm_settings() -> LLMSettings:
         provider=provider,
         openrouter_configured=bool(os.environ.get("OPENROUTER_API_KEY")),
         ollama_configured=bool(ollama_base_url) and not ollama_missing_models,
+        zai_configured=bool(os.environ.get("ZAI_API_KEY") or os.environ.get("GLM_API_KEY")),
         default_model_id=os.environ.get("OPENROUTER_DEFAULT_MODEL", "openai/gpt-4.1-mini"),
+        zai_base_url=zai_base_url,
+        zai_default_model_id=os.environ.get("ZAI_HOST_MODEL", "glm-4.5-flash"),
         timeout_seconds=float(os.environ.get("OPENROUTER_TIMEOUT_SECONDS", "45")),
         site_url=os.environ.get("OPENROUTER_SITE_URL", "http://localhost:3001"),
         app_name=os.environ.get("OPENROUTER_APP_NAME", "LLM Survivor Local"),
@@ -72,8 +80,13 @@ def should_use_ollama() -> bool:
     return settings.provider == PROVIDER_OLLAMA and settings.ollama_configured
 
 
+def should_use_zai() -> bool:
+    settings = get_llm_settings()
+    return settings.provider == PROVIDER_ZAI and settings.zai_configured
+
+
 def should_use_live_llm() -> bool:
-    return should_use_openrouter() or should_use_ollama()
+    return should_use_openrouter() or should_use_ollama() or should_use_zai()
 
 
 def live_llm_provider() -> str:
@@ -82,6 +95,8 @@ def live_llm_provider() -> str:
         return PROVIDER_OLLAMA
     if settings.provider == PROVIDER_OPENROUTER and settings.openrouter_configured:
         return PROVIDER_OPENROUTER
+    if settings.provider == PROVIDER_ZAI and settings.zai_configured:
+        return PROVIDER_ZAI
     return PROVIDER_DETERMINISTIC
 
 
@@ -97,6 +112,10 @@ def redact_secrets(exc: BaseException) -> str:
     api_key = os.environ.get("OPENROUTER_API_KEY")
     if api_key:
         message = message.replace(api_key, "[redacted]")
+    for secret_name in ("ZAI_API_KEY", "GLM_API_KEY"):
+        secret = os.environ.get(secret_name)
+        if secret:
+            message = message.replace(secret, "[redacted]")
     return message
 
 
